@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Double de curl. Deux sortes d'adresses :
+#   http://127.0.0.1:PORT/…  → 200 si un conteneur tient PORT et que sa version
+#                              n'est pas marquée « ko » ($BANC/ko/<sha>), sinon 000 ;
+#   http(s)://NOM/…          → passe par la « porte » : le bloc de conf.d qui
+#                              porte server_name NOM ; rend son X-Infra-App.
+. "$(dirname "$0")/_commun"
+url=""; entetes=0; code=0
+for a in "$@"; do case "$a" in http://*|https://*) url="$a" ;; -D) entetes=1 ;; *http_code*) code=1 ;; esac; done
+statut=000; app=""
+case "$url" in
+  http://127.0.0.1:*)
+    port="${url#http://127.0.0.1:}"; port="${port%%/*}"
+    for r in "$BANC"/docker/run/*; do [ -e "$r" ] || continue
+      read -r p ref _ < "$r"
+      [ "$p" = "$port" ] || continue
+      sha="${ref##*:}"; [ -f "$BANC/ko/$sha" ] && statut=500 || statut=200
+    done ;;
+  *)
+    nom="${url#*://}"; nom="${nom%%/*}"
+    f="$(grep -lE "server_name[[:space:]]+$nom;" "$INFRA_PREFIXE"/etc/nginx/conf.d/*.conf 2>/dev/null | head -1)"
+    if [ -n "$f" ]; then statut=200; app="$(sed -n 's/.*X-Infra-App \([a-z0-9-]*\) always;/\1/p' "$f" | head -1)"; fi ;;
+esac
+[ -f "$BANC/porte_muette" ] && app=""
+if [ "$entetes" = 1 ]; then
+  printf 'HTTP/1.1 %s OK\r\n' "$statut"; [ -n "$app" ] && printf 'X-Infra-App: %s\r\n' "$app"; printf '\r\n'
+fi
+[ "$code" = 1 ] && printf '%s' "$statut"
+[ "$statut" = 000 ] && exit 7
+exit 0

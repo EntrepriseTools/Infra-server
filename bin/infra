@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# =====================================================================
+# infra — L'outil du serveur. Un verbe, une application, toujours pareil.
+#
+#   SERVEUR      infra preparer [--hote IP] [--installer-paquets]
+#                infra docteur
+#                infra etat [app]          infra liste
+#                infra historique [app]
+#
+#   APPLICATION  infra creer <app> --manifeste <app.conf> --url <URL> [options]
+#                infra regler <app> [CLE=valeur …]
+#                infra editer <app>        (les secrets)
+#                infra cle <app>           (nouvelle clé SSH du pipeline)
+#                infra retirer <app> --confirmer <app>
+#
+#   DÉPLOIEMENT  infra livrer <app> <sha>  (le pipeline, par SSH : archive sur stdin)
+#                infra deployer <app> <sha>
+#                infra revenir <app> [sha]
+#                infra relancer <app>      infra porte <app>
+#                infra journaux <app> [N|-f]
+#
+#   BASE         infra sauvegarder <app>|--toutes [--garder N]
+#                infra prises <app>
+#                infra verifier <app> [prise]
+#                infra restaurer <app> <prise> --confirmer <app>
+#
+#                infra version · infra aide
+#
+# Tout ce qui touche au serveur se lance en root (sudo). Le détail de chaque
+# verbe est dans README.md, « Les verbes ».
+# =====================================================================
+set -euo pipefail
+umask 022
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+
+# INFRA_HOME : le répertoire qui porte lib/ et modeles/ (/opt/infra une fois
+# installé). Résolu depuis le lien /usr/local/bin/infra — jamais depuis
+# l'environnement quand on est appelé par sudo.
+_ici="$(readlink -f "${BASH_SOURCE[0]}")"
+INFRA_HOME="$(cd "$(dirname "$_ici")/.." && pwd)"
+if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != root ]; then
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+fi
+export INFRA_HOME
+
+# shellcheck source=../lib/commun.sh
+. "$INFRA_HOME/lib/commun.sh"
+# shellcheck source=../lib/registre.sh
+. "$INFRA_HOME/lib/registre.sh"
+# shellcheck source=../lib/base.sh
+. "$INFRA_HOME/lib/base.sh"
+# shellcheck source=../lib/conteneur.sh
+. "$INFRA_HOME/lib/conteneur.sh"
+# shellcheck source=../lib/porte.sh
+. "$INFRA_HOME/lib/porte.sh"
+# shellcheck source=../lib/verbes_serveur.sh
+. "$INFRA_HOME/lib/verbes_serveur.sh"
+# shellcheck source=../lib/verbes_app.sh
+. "$INFRA_HOME/lib/verbes_app.sh"
+# shellcheck source=../lib/verbes_deploiement.sh
+. "$INFRA_HOME/lib/verbes_deploiement.sh"
+# shellcheck source=../lib/verbes_base.sh
+. "$INFRA_HOME/lib/verbes_base.sh"
+
+aide() { sed -n '3,33p' "$_ici" | cut -c3-; }
+
+verbe="${1:-aide}"; shift || true
+case "$verbe" in
+  preparer)    cmd_preparer "$@" ;;
+  docteur)     cmd_docteur "$@" ;;
+  etat)        cmd_etat "$@" ;;
+  liste)       cmd_liste "$@" ;;
+  historique)  cmd_historique "$@" ;;
+  creer)       cmd_creer "$@" ;;
+  regler)      cmd_regler "$@" ;;
+  editer)      cmd_editer "$@" ;;
+  cle)         cmd_cle "$@" ;;
+  retirer)     cmd_retirer "$@" ;;
+  livrer)      cmd_livrer "$@" ;;
+  deployer)    cmd_deployer "$@" ;;
+  revenir)     cmd_revenir "$@" ;;
+  relancer)    cmd_relancer "$@" ;;
+  porte)       cmd_porte "$@" ;;
+  journaux)    cmd_journaux "$@" ;;
+  sauvegarder) cmd_sauvegarder "$@" ;;
+  prises)      cmd_prises "$@" ;;
+  verifier)    cmd_verifier "$@" ;;
+  restaurer)   cmd_restaurer "$@" ;;
+  version|--version) printf 'infra %s (%s)\n' "$(cat "$INFRA_HOME/VERSION")" "$INFRA_HOME" ;;
+  aide|-h|--help|--aide) aide ;;
+  *) mort "verbe inconnu : « $verbe »  —  infra aide" ;;
+esac

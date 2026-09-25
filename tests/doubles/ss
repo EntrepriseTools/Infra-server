@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Double de ss : un processus étranger écoute PORT si $BANC/ecoute/PORT existe.
+for a in "$@"; do case "$a" in *:[0-9]*) p="${a##*:}" ;; esac; done
+[ -n "${p:-}" ] && [ -f "$BANC/ecoute/$p" ] && echo "LISTEN 0 4096 127.0.0.1:$p 0.0.0.0:* users:((\"etranger\",pid=1))"
+exit 0

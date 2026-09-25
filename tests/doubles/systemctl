@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/_commun"
+noter "systemctl $*"
+case "$1" in
+  enable) for a in "$@"; do case "$a" in *.timer) touch "$BANC/active_$a" ;; esac; done ;;
+  disable) for a in "$@"; do case "$a" in *.timer) rm -f "$BANC/active_$a" ;; esac; done ;;
+  is-enabled) [ -f "$BANC/active_$2" ]; exit ;;
+esac
+exit 0

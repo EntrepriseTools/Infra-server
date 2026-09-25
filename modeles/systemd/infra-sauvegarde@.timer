@@ -1,0 +1,16 @@
+# Posé par « infra preparer ». L'heure de chaque application est posée par
+# « infra creer » dans un complément :
+#   /etc/systemd/system/infra-sauvegarde@<app>.timer.d/heure.conf
+# (SAUVEGARDE_HEURE de la fiche). Heures DÉCALÉES d'une application à
+# l'autre : deux pg_dump simultanés se disputent le même disque.
+[Unit]
+Description=Sauvegarde quotidienne de la base de %i (infra)
+
+[Timer]
+OnCalendar=*-*-* 21:00:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=infra-sauvegarde@%i.service
+
+[Install]
+WantedBy=timers.target

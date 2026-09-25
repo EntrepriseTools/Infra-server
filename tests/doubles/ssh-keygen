@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Double de ssh-keygen : une paire factice, suffisante pour le banc.
+while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift 2 ;; -C) c="$2"; shift 2 ;; *) shift ;; esac; done
+printf -- '-----BEGIN OPENSSH PRIVATE KEY-----\nFAUSSE\n-----END OPENSSH PRIVATE KEY-----\n' > "$f"
+printf 'ssh-ed25519 AAAAFAUSSE%s %s\n' "$RANDOM" "$c" > "$f.pub"

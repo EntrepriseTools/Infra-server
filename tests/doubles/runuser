@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Double de runuser : « runuser -u postgres -- cmd … » lance le double de cmd.
+while [ $# -gt 0 ] && [ "$1" != -- ]; do shift; done; shift
+exec "$(dirname "$0")/$1" "${@:2}"

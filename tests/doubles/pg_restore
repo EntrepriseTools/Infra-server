@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/_commun"
+if [ "$1" = --list ]; then [ "$(head -1 "$2" 2>/dev/null)" = DUMP ] || exit 1; echo "; TABLE DATA public utilisateur"; exit 0; fi
+d=""; for a in "$@"; do case "$a" in -d) :;; esac; done
+while [ $# -gt 0 ]; do case "$1" in -d) d="$2"; shift 2 ;; *) shift ;; esac; done
+contenu="$(cat)"; [ "${contenu%%$'\n'*}" = DUMP ] || exit 1
+printf '%s\n' "$contenu" | tail -n +2 > "$BANC/pg/bases/$d"; noter "pg_restore $d"

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Double de useradd : crée le compte POUR DE VRAI (le banc tourne en root dans
+# un conteneur jetable), mais range son répertoire sous INFRA_PREFIXE.
+args=(); while [ $# -gt 0 ]; do case "$1" in --home-dir) args+=(--home-dir "$INFRA_PREFIXE$2"); shift 2 ;; *) args+=("$1"); shift ;; esac; done
+mkdir -p "$INFRA_PREFIXE/home"
+exec /usr/sbin/useradd "${args[@]}"

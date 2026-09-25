@@ -1,0 +1,257 @@
+# =====================================================================
+# LE workflow de déploiement, RÉUTILISABLE — un seul, pour toutes les
+# applications de l'organisation.
+#
+# Un dépôt d'application ne le copie pas : il l'APPELLE, après ses propres
+# contrôles (tests, lint…), qui restent à lui :
+#
+#   deployer:
+#     needs: [verifier]
+#     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#     uses: EntrepriseTools/Infra-server/.github/workflows/deployer.yml@v1
+#     with:
+#       application: procurement
+#       contexte: ./backend
+#       frontend: frontend                # seulement en mode spa
+#     secrets: inherit
+#
+# Ce qu'il fait, et rien d'autre :
+#
+#   1. vérifie les secrets et que le manifeste (deploiement/app.conf) est
+#      bien celui de <application> ;
+#   2. bâtit l'image <IMAGE>:<sha> (étiquette = le SHA : ce qui a été éprouvé
+#      est exactement ce qui part ; jamais `latest`) ;
+#   3. bâtit l'écran si `frontend` est donné (mode spa) ;
+#   4. emballe  app.conf + image.tar.gz [+ frontend.tar.gz]  en UNE archive ;
+#   5. la pousse par SSH :  ssh <compte>@<serveur> livrer <sha> < archive
+#      — la clé est bridée côté serveur (infra-ssh) : elle ne peut que ça ;
+#      l'empreinte du serveur est VÉRIFIÉE (INFRA_SSH_KNOWN_HOSTS) ;
+#   6. sonde l'adresse publique DEPUIS INTERNET (le vrai DNS), si donnée.
+#
+# Tout le reste — sauvegarde relue, relance, sondes, retour arrière, écran,
+# porte nginx — est fait SUR LE SERVEUR par `infra livrer`, le même code pour
+# toutes les applications. Relancer à la main :  sudo infra deployer <app> <sha>
+#
+# Secrets attendus dans le dépôt appelant (Settings → Secrets → Actions) —
+# `infra creer` les affiche, prêts à copier :
+#   INFRA_SSH_HOST          l'adresse du serveur
+#   INFRA_SSH_USER          le compte de déploiement de l'application
+#   INFRA_SSH_KEY           sa clé privée (ed25519)
+#   INFRA_SSH_KNOWN_HOSTS   la ligne « hôte clé-publique-du-serveur »
+#   INFRA_SSH_PORT          (facultatif, 22 par défaut)
+#
+# ⚠ Dépôt PRIVÉ : Settings → Actions → General → Access → « Accessible from
+#   repositories in the EntrepriseTools organization », sinon les dépôts
+#   appelants ne le voient pas.
+# =====================================================================
+name: deployer (réutilisable)
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        description: "Nom de l'application sur le serveur (= APP du manifeste)"
+        type: string
+        required: true
+      manifeste:
+        description: "Chemin du manifeste dans le dépôt"
+        type: string
+        default: deploiement/app.conf
+      contexte:
+        description: "Contexte de construction de l'image"
+        type: string
+        default: "."
+      dockerfile:
+        description: "Dockerfile (vide = <contexte>/Dockerfile)"
+        type: string
+        default: ""
+      frontend:
+        description: "Répertoire de l'écran à bâtir (mode spa) — vide sinon"
+        type: string
+        default: ""
+      frontend-node:
+        type: string
+        default: "20"
+      frontend-commande:
+        type: string
+        default: "npm ci --no-audit --no-fund && npm run build"
+      frontend-sortie:
+        description: "Répertoire bâti, relatif à `frontend`"
+        type: string
+        default: dist
+      frontend-env:
+        description: "Variables de construction de l'écran, une CLE=valeur par ligne"
+        type: string
+        default: |
+          VITE_API_URL=/api
+          VITE_BASE_PATH=/
+      url-publique:
+        description: "Sondée depuis Internet après le déploiement (vide = pas de sonde)"
+        type: string
+        default: ""
+      environnement:
+        description: "Environnement GitHub (règles de protection, URL affichée)"
+        type: string
+        default: production
+    secrets:
+      INFRA_SSH_HOST:
+        required: true
+      INFRA_SSH_USER:
+        required: true
+      INFRA_SSH_KEY:
+        required: true
+      INFRA_SSH_KNOWN_HOSTS:
+        required: true
+      INFRA_SSH_PORT:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  deployer:
+    name: Livrer ${{ inputs.application }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment:
+      name: ${{ inputs.environnement }}
+      url: ${{ inputs.url-publique }}
+    # Jamais deux livraisons d'une même application à la fois, et jamais une
+    # coupée en route (entre la relance et la sonde). Le serveur a aussi son
+    # verrou ; celui-ci évite d'attendre pour rien.
+    concurrency:
+      group: infra-deployer-${{ inputs.application }}
+      cancel-in-progress: false
+    steps:
+      - name: Les secrets du serveur sont posés
+        env:
+          HOTE: ${{ secrets.INFRA_SSH_HOST }}
+          COMPTE: ${{ secrets.INFRA_SSH_USER }}
+          CLE: ${{ secrets.INFRA_SSH_KEY }}
+          CONNUS: ${{ secrets.INFRA_SSH_KNOWN_HOSTS }}
+        run: |
+          manque=""
+          [ -n "$HOTE" ]   || manque="$manque INFRA_SSH_HOST"
+          [ -n "$COMPTE" ] || manque="$manque INFRA_SSH_USER"
+          [ -n "$CLE" ]    || manque="$manque INFRA_SSH_KEY"
+          [ -n "$CONNUS" ] || manque="$manque INFRA_SSH_KNOWN_HOSTS"
+          if [ -n "$manque" ]; then
+            echo "::error title=Secrets absents::Il manque :$manque. Sur le serveur, « sudo infra cle ${{ inputs.application }} » les affiche. Rien n'a été touché."
+            exit 1
+          fi
+          case "$COMPTE" in root) echo "::error::INFRA_SSH_USER vaut root : chaque application a son compte."; exit 1 ;; esac
+
+      - uses: actions/checkout@v4
+
+      - name: Le manifeste est celui de « ${{ inputs.application }} »
+        id: manifeste
+        env:
+          MANIFESTE: ${{ inputs.manifeste }}
+          APPLICATION: ${{ inputs.application }}
+        run: |
+          [ -f "$MANIFESTE" ] || { echo "::error::$MANIFESTE absent (voir Infra-server, modeles/depot)."; exit 1; }
+          lire() { sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$MANIFESTE" | head -1 | tr -d '"'"'"'\r'; }
+          app="$(lire APP)"; image="$(lire IMAGE)"; mode="$(lire MODE_WEB)"
+          [ "$app" = "$APPLICATION" ] || { echo "::error::$MANIFESTE dit APP=$app, le workflow livre « $APPLICATION »."; exit 1; }
+          [[ "$image" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]] || { echo "::error::IMAGE illisible dans $MANIFESTE : « $image »."; exit 1; }
+          if [ "${mode:-proxy}" = spa ] && [ -z "${{ inputs.frontend }}" ]; then
+            echo "::error::MODE_WEB=spa mais l'entrée « frontend » est vide : l'écran ne serait pas livré."; exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "✓ $APPLICATION — image $image:${GITHUB_SHA::8}, mode ${mode:-proxy}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Pas d'artefact d'enregistrement de construction : le quota d'artefacts
+      # est celui du COMPTE, partagé ; il a déjà fait tomber la paie.
+      - name: L'image
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+        with:
+          context: ${{ inputs.contexte }}
+          file: ${{ inputs.dockerfile }}
+          push: false
+          tags: ${{ steps.manifeste.outputs.image }}:${{ github.sha }}
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
+          cache-from: type=gha,scope=${{ inputs.application }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.application }}
+
+      - uses: actions/setup-node@v4
+        if: inputs.frontend != ''
+        with:
+          node-version: ${{ inputs.frontend-node }}
+          cache: npm
+          cache-dependency-path: ${{ inputs.frontend }}/package-lock.json
+
+      - name: L'écran
+        if: inputs.frontend != ''
+        working-directory: ${{ inputs.frontend }}
+        env:
+          VARIABLES: ${{ inputs.frontend-env }}
+          COMMANDE: ${{ inputs.frontend-commande }}
+        run: |
+          while IFS= read -r kv; do
+            [ -n "$kv" ] || continue
+            [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || { echo "::error::frontend-env : « $kv »"; exit 1; }
+            export "${kv?}"
+          done <<< "$VARIABLES"
+          bash -euo pipefail -c "$COMMANDE"
+          [ -f "${{ inputs.frontend-sortie }}/index.html" ] || { echo "::error::pas d'index.html dans ${{ inputs.frontend }}/${{ inputs.frontend-sortie }}"; exit 1; }
+
+      - name: La livraison
+        run: |
+          d="$RUNNER_TEMP/livraison"; mkdir -p "$d"
+          cp "${{ inputs.manifeste }}" "$d/app.conf"
+          gzip -1 -c "$RUNNER_TEMP/image.tar" > "$d/image.tar.gz"
+          if [ -n "${{ inputs.frontend }}" ]; then
+            tar -czf "$d/frontend.tar.gz" -C "${{ inputs.frontend }}/${{ inputs.frontend-sortie }}" .
+          fi
+          tar -cf "$RUNNER_TEMP/livraison.tar" -C "$d" .
+          ls -lh "$d" "$RUNNER_TEMP/livraison.tar"
+
+      - name: Livrer au serveur (infra livrer)
+        env:
+          HOTE: ${{ secrets.INFRA_SSH_HOST }}
+          COMPTE: ${{ secrets.INFRA_SSH_USER }}
+          CLE: ${{ secrets.INFRA_SSH_KEY }}
+          CONNUS: ${{ secrets.INFRA_SSH_KNOWN_HOSTS }}
+          PORT: ${{ secrets.INFRA_SSH_PORT }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$CLE" > ~/.ssh/infra; chmod 0600 ~/.ssh/infra
+          printf '%s\n' "$CONNUS" > ~/.ssh/known_hosts_infra
+          # 25 minutes : le défaut d'appleboy/ssh-action était DIX, et couper
+          # entre la relance et la sonde laissait le serveur au milieu du gué.
+          timeout 25m ssh -i ~/.ssh/infra -p "${PORT:-22}" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/known_hosts_infra \
+            -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
+            "$COMPTE@$HOTE" "livrer $GITHUB_SHA" < "$RUNNER_TEMP/livraison.tar"
+          rm -f ~/.ssh/infra
+
+      # Le serveur a sondé en forçant la résolution vers lui-même : il prouve
+      # que nginx route le nom, pas que le DNS pointe ici. Ici, le vrai DNS.
+      - name: L'adresse publique répond, vue d'Internet
+        if: inputs.url-publique != ''
+        env:
+          URL: ${{ inputs.url-publique }}
+          APPLICATION: ${{ inputs.application }}
+        run: |
+          for _ in $(seq 1 12); do
+            if curl -sk -o /dev/null -D - --max-time 15 "${URL%/}/" | grep -qiE "^x-infra-app:[[:space:]]*$APPLICATION"; then
+              echo "✓ $URL répond, et c'est « $APPLICATION »"; exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::$URL ne répond pas par « $APPLICATION ». L'enregistrement DNS pointe-t-il sur le serveur ?"
+          exit 1
+
+      - name: Résumé
+        if: always()
+        run: |
+          {
+            echo "### ${{ inputs.application }} — ${GITHUB_SHA::8}"
+            echo "Image \`${{ steps.manifeste.outputs.image }}:${GITHUB_SHA}\` · statut : **${{ job.status }}**"
+            echo
+            echo "Sur le serveur : \`sudo infra etat ${{ inputs.application }}\` · \`sudo infra historique ${{ inputs.application }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

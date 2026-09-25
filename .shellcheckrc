@@ -1,0 +1,12 @@
+# Choix assumés, dits une fois ici plutôt qu'à chaque ligne :
+#  SC2086 — les listes du manifeste (SONDES, VOLUMES…) se découpent EXPRÈS sur
+#           les espaces ; chaque élément a été validé sans caractère de motif.
+#  SC2015 — « valide A && valide B || mort » : mort ne rend jamais la main.
+#  SC2016 — ${TAG:-en-service} est écrit tel quel dans le compose engendré.
+#  SC1112 — apostrophes typographiques dans des messages en français.
+#  SC2116 — « $(echo $LISTE) » replie une liste sur une ligne.
+#  SC2034 — variables lues par un autre fichier de lib/.
+#  SC1091 — lib/ est résolu à l'exécution depuis INFRA_HOME.
+#  SC2012 — « ls -t » trie NOS fichiers (noms engendrés, sans espace).
+disable=SC2086,SC2015,SC2016,SC1112,SC2116,SC2034,SC1091,SC2012
+external-sources=true

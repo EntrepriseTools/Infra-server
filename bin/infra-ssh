@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# =====================================================================
+# infra-ssh — la commande FORCÉE de la clé SSH d'un pipeline.
+#
+# `infra creer` pose la clé publique du pipeline ainsi :
+#
+#   restrict,command="/usr/local/bin/infra-ssh <app>" ssh-ed25519 AAAA… infra:<app>
+#
+# Quoi que le pipeline demande, sshd lance CE script (en tant que le compte
+# de déploiement), avec la demande dans SSH_ORIGINAL_COMMAND. Il n'en
+# accepte que trois formes, et ne fait qu'appeler `sudo infra` avec le nom de
+# l'application FIGÉ par la clé — une clé volée ne sert qu'à livrer une
+# version de CETTE application, jamais à ouvrir un shell.
+#
+#   ssh compte@serveur livrer <sha>  < livraison.tar
+#   ssh compte@serveur etat
+#   ssh compte@serveur historique
+# =====================================================================
+set -euo pipefail
+app="${1:?application}"
+set -f                                  # pas de développement de * ni de ?
+# shellcheck disable=SC2086
+set -- ${SSH_ORIGINAL_COMMAND:-}
+case "${1:-}" in
+  livrer)
+    [ $# -eq 2 ] && [[ "$2" =~ ^[0-9a-f]{7,40}$ ]] || { echo "infra-ssh : usage « livrer <sha> »" >&2; exit 2; }
+    exec sudo -n /usr/local/bin/infra livrer "$app" "$2" ;;
+  etat)        [ $# -eq 1 ] && exec sudo -n /usr/local/bin/infra etat "$app" ;;
+  historique)  [ $# -eq 1 ] && exec sudo -n /usr/local/bin/infra historique "$app" ;;
+esac
+echo "infra-ssh : commande refusée pour « $app » : « ${SSH_ORIGINAL_COMMAND:-} ». Admises : livrer <sha>, etat, historique." >&2
+exit 2

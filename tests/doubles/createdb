@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+. "$(dirname "$0")/_commun"
+mkdir -p "$BANC/pg/bases"; b="${@: -1}"
+printf 'public.utilisateur=3\npublic.flyway_schema_history=5\n' > "$BANC/pg/bases/$b"; noter "createdb $b"

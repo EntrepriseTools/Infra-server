@@ -1,0 +1,56 @@
+# =====================================================================
+# La campagne d'Infra-server lui-même : shellcheck, le banc, et — chaque
+# lundi ou à la demande — la preuve négative (mutations).
+# =====================================================================
+name: campagne
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mutations:
+        description: "Jouer aussi la preuve négative (≈ 3 min)"
+        type: boolean
+        default: true
+  schedule:
+    - cron: "0 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: campagne-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: shellcheck et banc
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -x bin/infra bin/infra-ssh installer.sh lib/*.sh outils/*.sh tests/*.sh
+      - name: bash -n
+        run: for f in bin/* lib/*.sh installer.sh outils/*.sh tests/*.sh tests/doubles/*; do bash -n "$f" || exit 1; done
+      - name: Le banc (les verbes, pour de vrai, contre des doubles)
+        run: sudo -E bash tests/banc.sh
+      - name: La preuve négative
+        if: github.event_name == 'schedule' || inputs.mutations || github.event_name == 'push'
+        run: sudo -E bash tests/mutations.sh
+
+  workflow:
+    name: Le workflow réutilisable se lit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          # Le modèle porte des jetons (__APP__…) : on lint un dépôt ENGENDRÉ.
+          bash outils/nouveau-depot.sh demo "$RUNNER_TEMP/demo" --mode spa
+          ./actionlint -color .github/workflows/*.yml "$RUNNER_TEMP/demo/.github/workflows/pipeline.yml"

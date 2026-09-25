@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Double de pg_dump : écrit « DUMP » puis le contenu de la base, sur stdout.
+. "$(dirname "$0")/_commun"
+[ -f "$BANC/pg_dump_panne" ] && { echo "pg_dump: panne simulée" >&2; exit 1; }
+b="${@: -1}"; [ -f "$BANC/pg/bases/$b" ] || exit 1
+noter "pg_dump $b"; echo DUMP; cat "$BANC/pg/bases/$b"

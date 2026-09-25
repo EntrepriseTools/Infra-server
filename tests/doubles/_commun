@@ -1,0 +1,3 @@
+# Commun aux doubles : $BANC est le répertoire d'état du banc.
+: "${BANC:?}"
+noter() { printf '%s\n' "$*" >> "$BANC/ordre.log"; }

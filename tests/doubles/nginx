@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Double de nginx -t : refuse toute conf de conf.d qui porte « INVALIDE »,
+# ou toute la conf si $BANC/nginx_refuse existe.
+. "$(dirname "$0")/_commun"
+[ -f "$BANC/nginx_refuse" ] && { echo "nginx: [emerg] refus simulé" >&2; exit 1; }
+grep -lq INVALIDE "$INFRA_PREFIXE"/etc/nginx/conf.d/*.conf 2>/dev/null && { echo "nginx: [emerg] INVALIDE" >&2; exit 1; }
+noter "nginx $*"; exit 0

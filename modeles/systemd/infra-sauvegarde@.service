@@ -1,0 +1,16 @@
+# Posé par « infra preparer ». Une instance par application :
+#   infra-sauvegarde@<app>.service  →  infra sauvegarder <app>
+# Il lance l'outil POSÉ par root (/usr/local/bin/infra), jamais un script
+# qu'un compte de déploiement pourrait réécrire : sinon, tenir le pipeline
+# reviendrait à tenir root chaque soir.
+[Unit]
+Description=Sauvegarde de la base de %i (infra)
+After=postgresql.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/infra sauvegarder %i
+SyslogIdentifier=infra-sauvegarde-%i
+Nice=10
+IOSchedulingClass=idle

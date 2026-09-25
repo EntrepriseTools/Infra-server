@@ -1,0 +1,20 @@
+# Exemple d'image Spring Boot (+ écran servi par le jar, mode proxy).
+# Renommer en Dockerfile et adapter. Principes communs aux trois applications :
+#  - plusieurs étapes, le JRE seul à l'arrivée ;
+#  - un compte sans privilège ;
+#  - AUCUN secret dans l'image : tout vient des secrets d'infra à l'exécution ;
+#  - pas de tests ici : le pipeline vient de les jouer, avec une vraie base.
+FROM eclipse-temurin:21-jdk AS construction
+WORKDIR /source
+COPY __BACKEND__/ ./
+RUN chmod +x gradlew && ./gradlew bootJar --no-daemon --console=plain -x test \
+    && cp build/libs/*.jar /app.jar
+
+FROM eclipse-temurin:21-jre
+ENV LANG=C.UTF-8 TZ=Africa/Casablanca
+RUN groupadd --system app && useradd --system --gid app --home-dir /opt/app --shell /usr/sbin/nologin app
+WORKDIR /opt/app
+COPY --from=construction /app.jar app.jar
+USER app
+# Le port et l'adresse sont posés par infra (VARIABLE_PORT / VARIABLE_ADRESSE).
+ENTRYPOINT ["java", "-XX:MaxRAMPercentage=70", "-jar", "/opt/app/app.jar"]

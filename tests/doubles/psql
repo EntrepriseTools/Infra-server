@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Double de psql : une base = $BANC/pg/bases/<nom> (lignes « public.t=n »),
+# un rôle = $BANC/pg/roles/<nom>.
+. "$(dirname "$0")/_commun"
+P="$BANC/pg"; mkdir -p "$P/bases" "$P/roles"
+[ -f "$BANC/pg_mort" ] && exit 2
+base=postgres; req=""; fic=""
+while [ $# -gt 0 ]; do case "$1" in -d) base="$2"; shift 2 ;; -c) req="$2"; shift 2 ;; -f) fic="$2"; shift 2 ;; -v|-p) shift 2 ;; *) shift ;; esac; done
+[ "$fic" = - ] && req="$(cat)"
+case "$req" in
+  *"from pg_database where datname="*) n="${req#*datname=\'}"; n="${n%%\'*}"; [ -f "$P/bases/$n" ] && echo 1 ;;
+  *"from pg_roles where rolname="*)    n="${req#*rolname=\'}"; n="${n%%\'*}"; [ -f "$P/roles/$n" ] && echo 1 ;;
+  *"create role "*) n="${req#*create role }"; n="${n%% *}"; touch "$P/roles/$n"; noter "psql create role $n" ;;
+  "create database "*) touch "$P/bases/${req#create database }" ;;
+  "drop database if exists "*) rm -f "$P/bases/${req#drop database if exists }" ;;
+  *information_schema.tables*) cut -d= -f1 "$P/bases/$base" 2>/dev/null ;;
+  "select count(*) from "*) t="${req#select count(*) from }"; grep "^$t=" "$P/bases/$base" | cut -d= -f2 ;;
+  *version*|"select 1") echo "17.2" ;;
+  *) : ;;
+esac
+exit 0

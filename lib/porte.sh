@@ -99,10 +99,10 @@ sonder_porte() {
   [[ "$A_NOM" =~ ^[0-9.]+$ ]] || res=(--resolve "$A_NOM:$pp:127.0.0.1")
   for i in $(seq 1 "$PORTE_ESSAIS"); do
     ent="$(curl -sk --noproxy '*' -o /dev/null -D - --max-time 15 ${res[@]+"${res[@]}"} "$A_SCHEMA://$A_NOM$M_SONDE_PUBLIQUE" 2>/dev/null || true)"
-    printf '%s' "$ent" | grep -qiE "^x-infra-app:[[:space:]]*${A_APP}[[:space:]]*$" && break
+    printf '%s' "$ent" | grep -iE "^x-infra-app:[[:space:]]*${A_APP}[[:space:]]*$" >/dev/null && break
     [ "$i" -lt "$PORTE_ESSAIS" ] && sleep "$PORTE_PAUSE"
   done
-  if printf '%s' "$ent" | grep -qiE "^x-infra-app:[[:space:]]*${A_APP}[[:space:]]*$"; then
+  if printf '%s' "$ent" | grep -iE "^x-infra-app:[[:space:]]*${A_APP}[[:space:]]*$" >/dev/null; then
     vert "$A_SCHEMA://$A_NOM$M_SONDE_PUBLIQUE répond, et c'est bien « $A_APP » (X-Infra-App)"
   else
     rouge "$A_SCHEMA://$A_NOM/ ne répond pas par « $A_APP » — un autre bloc répond, ou le nom ne résout pas ici."

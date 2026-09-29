@@ -98,13 +98,13 @@ grep -q "infra livrer essai \*" "$INFRA_PREFIXE/etc/sudoers.d/infra-essai" && ok
 grep -q "^restrict,command=\"/usr/local/bin/infra-ssh essai\" ssh-ed25519" "$INFRA_PREFIXE/home/$COMPTE/.ssh/authorized_keys" \
   && ok "clé bridée (restrict + command forcée)" || ko "clé bridée absente"
 grep -q 'OnCalendar=\*-\*-\* ' "$INFRA_PREFIXE/etc/systemd/system/infra-sauvegarde@essai.timer.d/heure.conf" && ok "minuteur à son heure" || ko "minuteur"
-printf '%s' "$SORTIE" | grep -q 'BEGIN OPENSSH PRIVATE KEY' && ok "clé privée affichée une fois" || ko "clé privée non affichée"
-printf '%s' "$SORTIE" | grep -q 'INFRA_SSH_KNOWN_HOSTS  203.0.113.10 ssh-ed25519 AAAAHOTE' && ok "known_hosts prêt à copier" || ko "known_hosts" "$SORTIE"
+grep -q -- 'BEGIN OPENSSH PRIVATE KEY' <<<"$SORTIE" && ok "clé privée affichée une fois" || ko "clé privée non affichée"
+grep -q -- 'INFRA_SSH_KNOWN_HOSTS  203.0.113.10 ssh-ed25519 AAAAHOTE' <<<"$SORTIE" && ok "known_hosts prêt à copier" || ko "known_hosts" "$SORTIE"
 lancer creer essai --manifeste "$MANIF" --url http://x.ma
 [ "$STATUT" != 0 ] && ok "une application ne se crée pas deux fois" || ko "re-création acceptée"
 sed 's/^APP=essai/APP=autre/' "$MANIF" > "$BANC/autre.conf"
 lancer creer autre --manifeste "$BANC/autre.conf" --url http://autre.ma --port 8150 --compte "$COMPTE" --adopter
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "8150" && ok "port déjà pris : refusé" || ko "port en double accepté" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "8150" <<<"$SORTIE" && ok "port déjà pris : refusé" || ko "port en double accepté" "$SORTIE"
 
 # ---- l'adoption d'une application existante (--depuis) ----
 mkdir -p "$BANC/ancien"; printf 'PGPASSWORD=ancien\nJWT_SECRET=ancienjwt\n' > "$BANC/ancien/.env"
@@ -151,13 +151,13 @@ livrer "$SHA2" ko
 [ "$(en_service)" = "$SHA1" ] && ok "la version en service reste $SHA1" || ko "en-service = $(en_service)"
 grep -q "equipe/essai:$SHA1" "$BANC/docker/run/essai" && ok "le conteneur tourne à nouveau sur l'ancienne" || ko "conteneur" "$(cat "$BANC/docker/run/essai")"
 grep -q "<html>$SHA1</html>" "$INFRA_PREFIXE/var/lib/infra/essai/ecran/courant/index.html" && ok "l'écran n'a pas bougé" || ko "écran changé malgré l'échec"
-printf '%s' "$SORTIE" | grep -q 'RETOUR ARRIÈRE' && ok "le retour arrière est dit" || ko "retour arrière muet"
+grep -q -- 'RETOUR ARRIÈRE' <<<"$SORTIE" && ok "le retour arrière est dit" || ko "retour arrière muet"
 grep -q "ECHEC" "$INFRA_PREFIXE/var/log/infra/deploiements.log" && ok "échec historisé" || ko "échec non historisé"
 
 bloc "5. relivrer la version en service : on reprend à la porte"
 livrer "$SHA1"
 [ "$STATUT" = 0 ] && ok "rend 0" || ko "rend $STATUT" "$SORTIE"
-printf '%s' "$SORTIE" | grep -q 'tourne déjà' && ok "pas de relance inutile" || ko "relance inutile" "$SORTIE"
+grep -q -- 'tourne déjà' <<<"$SORTIE" && ok "pas de relance inutile" || ko "relance inutile" "$SORTIE"
 grep -q 'docker compose up' "$BANC/ordre.log" && ko "conteneur relancé pour rien" || ok "conteneur non touché"
 grep -q 'systemctl reload nginx' "$BANC/ordre.log" && ok "la porte est quand même reposée" || ko "porte non reposée"
 
@@ -193,16 +193,16 @@ bloc "9. livraisons refusées"
 d="$BANC/piege"; rm -rf "$d"; mkdir -p "$d"; cp "$MANIF" "$d/app.conf"; ln -s /etc/shadow "$d/image.tar.gz"
 tar -cf "$d.tar" -C "$d" app.conf image.tar.gz
 SORTIE="$("$INFRA" livrer essai "$SHA2" < "$d.tar" 2>&1)"; STATUT=$?
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "pas un fichier ordinaire" && ok "lien symbolique dans la livraison : refusé" || ko "lien accepté" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "pas un fichier ordinaire" <<<"$SORTIE" && ok "lien symbolique dans la livraison : refusé" || ko "lien accepté" "$SORTIE"
 rm -f "$d/image.tar.gz"; echo x > "$d/autre.sh"; tar -cf "$d.tar" -C "$d" app.conf autre.sh
 SORTIE="$("$INFRA" livrer essai "$SHA2" < "$d.tar" 2>&1)"; STATUT=$?
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "inattendu" && ok "fichier inattendu : refusé" || ko "fichier inattendu accepté" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "inattendu" <<<"$SORTIE" && ok "fichier inattendu : refusé" || ko "fichier inattendu accepté" "$SORTIE"
 sed 's/^APP=essai/APP=pirate/' "$MANIF" > "$BANC/m1"; livrer "$SHA2" "" "$BANC/m1"
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "on attendait « essai »" && ok "manifeste d'une autre application : refusé" || ko "manifeste étranger accepté" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "on attendait « essai »" <<<"$SORTIE" && ok "manifeste d'une autre application : refusé" || ko "manifeste étranger accepté" "$SORTIE"
 sed 's|^VOLUMES=.*|VOLUMES="/:/hote"|' "$MANIF" > "$BANC/m2"; livrer "$SHA2" "" "$BANC/m2"
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "jamais un chemin de l'hôte" && ok "montage de l'hôte : refusé" || ko "montage de l'hôte accepté" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "jamais un chemin de l'hôte" <<<"$SORTIE" && ok "montage de l'hôte : refusé" || ko "montage de l'hôte accepté" "$SORTIE"
 { cat "$MANIF"; echo 'PRIVILEGIE=oui'; } > "$BANC/m3"; livrer "$SHA2" "" "$BANC/m3"
-[ "$STATUT" != 0 ] && printf '%s' "$SORTIE" | grep -q "clé inconnue" && ok "clé inconnue : refusée" || ko "clé inconnue acceptée" "$SORTIE"
+[ "$STATUT" != 0 ] && grep -q -- "clé inconnue" <<<"$SORTIE" && ok "clé inconnue : refusée" || ko "clé inconnue acceptée" "$SORTIE"
 lancer livrer essai 'abc;rm'
 [ "$STATUT" != 0 ] && ok "version illisible : refusée" || ko "version illisible acceptée"
 [ "$(en_service)" = "$SHA1" ] && ok "après tous ces refus, $SHA1 sert toujours" || ko "en-service = $(en_service)"
@@ -223,7 +223,7 @@ for i in 1 2 3; do lancer sauvegarder essai --garder 2; sleep 1; done
 lancer sauvegarder --toutes
 [ "$STATUT" = 0 ] && ok "sauvegarder --toutes" || ko "sauvegarder --toutes" "$SORTIE"
 lancer verifier essai
-[ "$STATUT" = 0 ] && printf '%s' "$SORTIE" | grep -q "coïncident" && ok "verifier : la prise rend la base" || ko "verifier" "$SORTIE"
+[ "$STATUT" = 0 ] && grep -q -- "coïncident" <<<"$SORTIE" && ok "verifier : la prise rend la base" || ko "verifier" "$SORTIE"
 compgen -G "$BANC/pg/bases/*_verif_*" >/dev/null && ko "base jetable laissée derrière" || ok "base jetable balayée"
 prise="$(ls "$INFRA_PREFIXE"/var/backups/infra/essai/quotidien_* | head -1)"
 lancer restaurer essai "$prise"
@@ -241,11 +241,11 @@ SSH_ORIGINAL_COMMAND="livrer $SHA1" "$ICI/bin/infra-ssh" essai </dev/null >/dev/
 grep -q "sudo -n /usr/local/bin/infra livrer essai $SHA1" "$BANC/ordre.log" && ok "livrer <sha> → sudo infra livrer essai <sha>" || ko "livrer non transmis" "$(cat "$BANC/ordre.log")"
 
 bloc "13. etat, docteur, historique"
-lancer etat;              [ "$STATUT" = 0 ] && printf '%s' "$SORTIE" | grep -q essai && ok "etat (tous)" || ko "etat" "$SORTIE"
+lancer etat;              [ "$STATUT" = 0 ] && grep -q -- essai <<<"$SORTIE" && ok "etat (tous)" || ko "etat" "$SORTIE"
 lancer etat essai;        [ "$STATUT" = 0 ] && ok "etat essai" || ko "etat essai" "$SORTIE"
 lancer historique essai;  [ "$STATUT" = 0 ] && ok "historique" || ko "historique" "$SORTIE"
-lancer docteur;           [ "$STATUT" -le 1 ] && printf '%s' "$SORTIE" | grep -q "clé du pipeline posée" && ok "docteur passe en revue" || ko "docteur" "$SORTIE"
-lancer version;           printf '%s' "$SORTIE" | grep -q "infra $(cat "$ICI/VERSION")" && ok "version" || ko "version"
+lancer docteur;           [ "$STATUT" -le 1 ] && grep -q -- "clé du pipeline posée" <<<"$SORTIE" && ok "docteur passe en revue" || ko "docteur" "$SORTIE"
+lancer version;           grep -q -- "infra $(cat "$ICI/VERSION")" <<<"$SORTIE" && ok "version" || ko "version"
 
 bloc "14. retirer"
 lancer retirer essai

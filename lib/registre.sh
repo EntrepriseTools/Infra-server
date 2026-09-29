@@ -108,7 +108,7 @@ charger_manifeste() {
   # Les clés présentes doivent toutes être connues.
   while IFS= read -r cle; do
     [ -n "$cle" ] || continue
-    printf '%s\n' $CLES_MANIFESTE | grep -qxF "$cle" \
+    printf '%s\n' $CLES_MANIFESTE | grep -xF "$cle" >/dev/null \
       || mort "manifeste $f : clé inconnue « $cle ». Connues : $(echo $CLES_MANIFESTE)"
   done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*=.*/\1/p' "$f")
 

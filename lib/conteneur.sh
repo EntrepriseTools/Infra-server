@@ -67,7 +67,7 @@ etrangers_sur_le_port() {
   docker ps --filter "publish=$1" --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
   | while IFS=$'\t' read -r nom image; do
       [ -n "$nom" ] || continue
-      printf '%s\n' "$nous" | grep -qxF "$nom" && continue
+      printf '%s\n' "$nous" | grep -xF "$nom" >/dev/null && continue
       printf '%s  %s\n' "$nom" "$image"
     done
 }

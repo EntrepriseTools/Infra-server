@@ -25,7 +25,7 @@ port_libre() {
   local p=8100 pris
   pris="$(for a in $(applications); do lire "$(fiche_de "$a")" PORT; echo; done)"
   while [ "$p" -lt 8200 ]; do
-    if ! printf '%s\n' "$pris" | grep -qxF "$p" && [ -z "$(ecoute_sur_le_port "$p")" ]; then echo "$p"; return 0; fi
+    if ! printf '%s\n' "$pris" | grep -xF "$p" >/dev/null && [ -z "$(ecoute_sur_le_port "$p")" ]; then echo "$p"; return 0; fi
     p=$((p + 1))
   done
   mort "aucun port libre entre 8100 et 8199 : --port N"
@@ -146,7 +146,7 @@ cmd_creer() {
     useradd --system --create-home --home-dir "/home/$compte" --shell /bin/bash "$compte"
     vert "compte système créé (sans mot de passe : il n'entre que par sa clé)"
   fi
-  if id -nG "$compte" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+  if id -nG "$compte" 2>/dev/null | tr ' ' '\n' | grep -x docker >/dev/null; then
     jaune "« $compte » est dans le groupe docker : ce n'est plus nécessaire, et c'est un équivalent root."
     info "Le retirer quand l'ancien pipeline est arrêté :  sudo gpasswd -d $compte docker"
   fi
@@ -257,14 +257,14 @@ ecrire_secrets() {  # ecrire_secrets FICHIER ROLE BASE MDP ROLE_CREE
     fi
     printf '\n# ---- À remplir (VARIABLES_OBLIGATOIRES du manifeste) ----\n'
     for v in $M_VARIABLES_OBLIGATOIRES; do
-      printf '%s\n' $M_BASE_VARIABLES $M_SECRETS | cut -d= -f1 | grep -qxF "$v" || printf '%s=\n' "$v"
+      printf '%s\n' $M_BASE_VARIABLES $M_SECRETS | cut -d= -f1 | grep -xF "$v" >/dev/null || printf '%s=\n' "$v"
     done
   ) > "$s"
   chown root:root "$s"; chmod 0600 "$s"
   for v in $M_VARIABLES_OBLIGATOIRES; do [ -n "$(lire "$s" "$v")" ] || a_remplir="$a_remplir $v"; done
   vert "$s écrit"
   [ -z "$a_remplir" ] || jaune "à remplir avant le premier déploiement :$a_remplir   (sudo infra editer $A_APP)"
-  if printf '%s\n' $M_SECRETS | grep -q '^ADMIN_PASSWORD='; then
+  if printf '%s\n' $M_SECRETS | grep '^ADMIN_PASSWORD=' >/dev/null; then
     info "Mot de passe administrateur initial : $(lire "$s" ADMIN_PASSWORD)  — le changer à la première connexion."
   fi
 }
@@ -282,7 +282,7 @@ cmd_regler() {
   for kv in "$@"; do
     cle="${kv%%=*}"; val="${kv#*=}"
     [[ "$kv" == *=* ]] || { mv -f "$f.avant" "$f"; mort "attendu CLE=valeur — lu « $kv »"; }
-    printf '%s\n' $CLES_REGLABLES | grep -qxF "$cle" || { mv -f "$f.avant" "$f"; mort "« $cle » ne se règle pas. Réglables : $CLES_REGLABLES"; }
+    printf '%s\n' $CLES_REGLABLES | grep -xF "$cle" >/dev/null || { mv -f "$f.avant" "$f"; mort "« $cle » ne se règle pas. Réglables : $CLES_REGLABLES"; }
     [[ "$val" =~ ^[A-Za-z0-9@._:/\ +-]*$ ]] || { mv -f "$f.avant" "$f"; mort "valeur illisible pour $cle."; }
     ecrire_cle "$f" "$cle" "$val"
   done

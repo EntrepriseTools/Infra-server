@@ -39,12 +39,8 @@ resource "helm_release" "argocd" {
         "admin.enabled"          = true
         "exec.enabled"           = false # pas de terminal dans les pods depuis l'UI
         "timeout.reconciliation" = "120s"
-        # Les ressources que Kyverno engendre ne sont pas « hors synchro ».
-        "resource.exclusions" = yamlencode([{
-          apiGroups = ["kyverno.io", "reports.kyverno.io", "wgpolicyk8s.io"]
-          kinds     = ["*Report", "UpdateRequest"]
-          clusters  = ["*"]
-        }])
+        # NB : on ne surcharge PAS resource.exclusions — les défauts du chart
+        # excluent déjà Endpoints, Leases, les rapports Kyverno, etc.
       }
       secret = {
         # Seule l'empreinte bcrypt est dans le state et dans le cluster.

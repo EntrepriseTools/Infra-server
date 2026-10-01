@@ -289,6 +289,9 @@ jobs:
           repository: ${{ github.repository_owner }}/${{ inputs.depot-gitops }}
           token: ${{ steps.jeton.outputs.token }}
           path: depot-gitops
+          # Historique complet : `git pull --rebase` sur un clone superficiel
+          # peut échouer quand d'autres promotions sont arrivées entre-temps.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: écrire la nouvelle version, commit, push

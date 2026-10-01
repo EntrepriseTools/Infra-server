@@ -115,6 +115,9 @@ variable "registres_autorises" {
     "ghcr.io/entreprisetools/*",
     # L'image de la sauvegarde avant déploiement (hook PreSync du chart).
     "docker.io/library/postgres:*",
+    # Le pod éphémère du défi HTTP-01 de cert-manager (mode direct), créé
+    # dans l'espace de l'application le temps d'obtenir un certificat.
+    "quay.io/jetstack/cert-manager-acmesolver:*",
   ]
 }
 

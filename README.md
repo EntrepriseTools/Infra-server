@@ -87,6 +87,16 @@ Le **manifeste** (`app.conf`) a été pensé pour ne pas bloquer cette évolutio
 Il décrit image, sondes, volumes et variables, soit exactement ce qu'un chart
 Helm demanderait.
 
+> **Depuis : la voie Kubernetes existe, à côté.** Pour monter en compétence
+> sur Kubernetes, Terraform, Helm et le DevSecOps — et préparer le jour où
+> l'un des cas ci-dessus arrive — le dépôt porte aussi une **plateforme
+> Kubernetes** complète (k3s durci, Terraform, Helm, Argo CD, Kyverno,
+> signatures d'images, GitHub Actions). Elle **coexiste** avec `infra` : on
+> y migre une application à la fois, avec un retour arrière à chaque étape.
+> Les raisons ci-dessus restent vraies ; la plateforme est un choix
+> d'apprentissage et d'anticipation, assumé comme tel.
+> → **[docs/plateforme/](docs/plateforme/00-LISEZMOI.md)**
+
 ---
 
 ## 2. Les idées qui tiennent tout
@@ -664,4 +674,10 @@ tests/
 .github/workflows/
   deployer.yml             LE workflow réutilisable
   ci.yml                   la campagne d'Infra-server
+  plateforme-qualite.yml   ┐
+  plateforme-terraform.yml ├ la voie Kubernetes (docs/plateforme/)
+  k8s-publier.yml          ┘
+plateforme/                la voie Kubernetes : amorçage k3s, Terraform, charts Helm, labo
+gitops/                    l'état voulu des applications, lu par Argo CD
+docs/plateforme/           la documentation et le parcours d'apprentissage de la voie Kubernetes
 ```

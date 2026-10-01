@@ -55,7 +55,9 @@ appliquer() {
   : "${TF_VAR_argocd_admin_bcrypt:?exporter TF_VAR_argocd_admin_bcrypt}"
   cd "$RACINE/terraform/plateforme"
   # Le state du labo vit dans le cluster du labo (même backend qu'en production).
-  "$TF" init -reconfigure -backend-config="config_context=$CONTEXTE"
+  "$TF" init -reconfigure \
+    -backend-config="config_path=${KUBECONFIG:-$HOME/.kube/config}" \
+    -backend-config="config_context=$CONTEXTE"
   "$TF" plan -var-file="$ICI/labo.tfvars" -out=labo.tfplan
   "$TF" apply labo.tfplan
   rm -f labo.tfplan

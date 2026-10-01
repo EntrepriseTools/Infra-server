@@ -1,0 +1,71 @@
+{{- /* =====================================================================
+       L'ApplicationSet : UNE Application Argo CD par dossier
+       gitops/applications/<nom>/ — sans rien écrire de plus.
+
+       Ajouter une application = créer le dossier (values.yaml) dans le
+       dépôt. La supprimer = supprimer le dossier : l'Application disparaît,
+       mais PAS ses objets (preserveResourcesOnDeletion) — on ne coupe pas
+       une application en production par un `git rm`.
+
+       Chaque Application a DEUX sources :
+         1. le chart commun          plateforme/helm/application
+         2. le même dépôt, nommé $valeurs, d'où l'on prend le values.yaml
+       Les gabarits Go d'Argo CD ({{.path.basename}}) sont protégés du
+       moteur de Helm par des chaînes brutes : {{`…`}}.
+       ===================================================================== */ -}}
+{{- $g := .Values.gitops -}}
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: applications
+  namespace: {{ .Release.Namespace }}
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: {{ $g.depot | quote }}
+        revision: {{ $g.revision | quote }}
+        directories:
+          - path: {{ printf "%s/*" $g.dossierApplications | quote }}
+  syncPolicy:
+    preserveResourcesOnDeletion: true
+  template:
+    metadata:
+      name: {{`'{{ .path.basename }}'`}}
+      labels:
+        plateforme.entreprisetools/type: application
+    spec:
+      project: applications
+      sources:
+        - repoURL: {{ $g.depot | quote }}
+          targetRevision: {{ $g.revision | quote }}
+          path: {{ $g.chartApplication | quote }}
+          helm:
+            releaseName: {{`'{{ .path.basename }}'`}}
+            valueFiles:
+              - {{ printf "$valeurs/%s/{{ .path.basename }}/values.yaml" $g.dossierApplications | quote }}
+        - repoURL: {{ $g.depot | quote }}
+          targetRevision: {{ $g.revision | quote }}
+          ref: valeurs
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{`'{{ .path.basename }}'`}}
+      syncPolicy:
+        automated:
+          # Ce qui disparaît de Git disparaît du cluster…
+          prune: true
+          # … et ce qui est modifié à la main est remis comme dans Git.
+          selfHeal: true
+        syncOptions:
+          # L'espace est créé par Terraform, avec ses quotas : jamais par Argo CD.
+          - CreateNamespace=false
+          - ServerSideApply=true
+          - PruneLast=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 15s
+            factor: 2
+            maxDuration: 5m
+      revisionHistoryLimit: 10

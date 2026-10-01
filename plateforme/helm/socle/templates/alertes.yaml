@@ -1,0 +1,56 @@
+{{- /* Les alertes propres à la plateforme (Prometheus). kube-prometheus-stack
+       apporte déjà les classiques : pod qui redémarre en boucle, nœud plein,
+       mémoire, etc. Ici : ce que `infra docteur` surveillait. */ -}}
+{{- if .Values.observabilite }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: plateforme
+  namespace: {{ .Release.Namespace }}
+spec:
+  groups:
+    - name: plateforme
+      rules:
+        - alert: CertificatBientotExpire
+          # infra docteur : < 21 jours = erreur.
+          expr: (certmanager_certificate_expiration_timestamp_seconds - time()) < 21 * 24 * 3600
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Le certificat {{`{{ $labels.name }}`}} ({{`{{ $labels.namespace }}`}}) expire dans moins de 21 jours."
+            description: "kubectl -n {{`{{ $labels.namespace }}`}} describe certificate {{`{{ $labels.name }}`}}"
+
+        - alert: SauvegardeAvantDeploiementEchouee
+          expr: kube_job_status_failed{job_name=~".+-sauvegarde"} > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "La sauvegarde avant déploiement a échoué dans {{`{{ $labels.namespace }}`}} : la nouvelle version n'est PAS déployée."
+            description: "kubectl -n {{`{{ $labels.namespace }}`}} logs job/{{`{{ $labels.job_name }}`}}"
+
+        - alert: ApplicationArgoCDDegradee
+          expr: argocd_app_info{health_status!~"Healthy|Progressing"} == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "L'application {{`{{ $labels.name }}`}} est {{`{{ $labels.health_status }}`}} depuis 15 min."
+            description: "Interface Argo CD, ou : kubectl -n argocd get application {{`{{ $labels.name }}`}} -o yaml"
+
+        - alert: ApplicationArgoCDHorsSynchro
+          expr: argocd_app_info{sync_status="OutOfSync"} == 1
+          for: 30m
+          labels:
+            severity: info
+          annotations:
+            summary: "L'application {{`{{ $labels.name }}`}} n'est pas synchronisée avec Git depuis 30 min."
+
+        - alert: PolitiqueKyvernoViolee
+          expr: sum by (policy_name, resource_namespace) (increase(kyverno_policy_results_total{rule_result="fail"}[1h])) > 0
+          labels:
+            severity: info
+          annotations:
+            summary: "La politique {{`{{ $labels.policy_name }}`}} est violée dans {{`{{ $labels.resource_namespace }}`}}."
+            description: "kubectl -n {{`{{ $labels.resource_namespace }}`}} get policyreport -o wide"
+{{- end }}

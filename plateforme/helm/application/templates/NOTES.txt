@@ -1,0 +1,11 @@
+{{ include "application.nom" . }} — version {{ include "application.version" . }}, espace {{ .Release.Namespace }}.
+
+  État :        kubectl -n {{ .Release.Namespace }} get deploy,pods,ingress
+  Journaux :    kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "application.nom" . }} -f
+  Test :        helm -n {{ .Release.Namespace }} test {{ .Release.Name }}
+{{- if .Values.ingress.actif }}
+  Adresse :     http{{ if .Values.ingress.tls.actif }}s{{ end }}://{{ .Values.ingress.hote }}/
+{{- end }}
+{{- if .Values.sauvegardeAvantDeploiement.actif }}
+  Prises :      kubectl -n {{ .Release.Namespace }} logs job/{{ include "application.nom" . }}-sauvegarde
+{{- end }}

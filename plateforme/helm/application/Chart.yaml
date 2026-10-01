@@ -1,0 +1,14 @@
+apiVersion: v2
+name: application
+description: >-
+  Le chart COMMUN des applications d'EntrepriseTools (Spring Boot, écran
+  facultatif). Un seul chart, des valeurs par application
+  (gitops/applications/<app>/values.yaml) — l'équivalent Kubernetes du
+  manifeste app.conf d'infra.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+kubeVersion: ">=1.30.0-0"
+maintainers:
+  - name: EntrepriseTools
+keywords: [spring-boot, entreprisetools, plateforme]

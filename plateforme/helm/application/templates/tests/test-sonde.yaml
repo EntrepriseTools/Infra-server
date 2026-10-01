@@ -1,0 +1,36 @@
+{{- /* `helm test <release>` — Argo CD ne joue pas les tests Helm : on le
+       lance à la main depuis le serveur. Il interroge le
+       Service DE L'INTÉRIEUR du cluster, comme le ferait Traefik.
+       L'image est celle de la sauvegarde (busybox wget y est), pour ne pas
+       ajouter un registre à la liste permise. */ -}}
+{{- $nom := include "application.nom" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $nom }}-test-sonde
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: sonde
+      image: {{ .Values.sauvegardeAvantDeploiement.image | quote }}
+      command: ["wget", "-q", "-O", "-", "-T", "10", "http://{{ $nom }}{{ default .Values.sondes.chemin .Values.sondes.preparation.chemin }}"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          memory: 32Mi
+      securityContext:
+        {{- include "application.securiteConteneur" (dict "racineEnLectureSeule" true) | nindent 8 }}

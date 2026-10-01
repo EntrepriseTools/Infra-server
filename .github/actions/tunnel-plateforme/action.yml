@@ -1,0 +1,72 @@
+# =====================================================================
+# Ouvre un tunnel SSH vers l'API Kubernetes du serveur et prépare le
+# kubeconfig pour Terraform.
+#
+#   GitHub Actions ──ssh──▶ tunnel-ci@serveur ──▶ 127.0.0.1:6443 (API k3s)
+#
+# L'API n'est JAMAIS exposée sur Internet (garde nftables). La clé du
+# compte tunnel-ci ne permet QUE cette redirection (compte-tunnel-ci.sh).
+# L'empreinte du serveur est VÉRIFIÉE (StrictHostKeyChecking=yes).
+# =====================================================================
+name: tunnel plateforme
+description: Tunnel SSH vers l'API Kubernetes et kubeconfig pour Terraform
+inputs:
+  hote:
+    description: Adresse du serveur
+    required: true
+  utilisateur:
+    description: Compte SSH du tunnel
+    required: true
+  cle:
+    description: Clé privée SSH du tunnel
+    required: true
+  hotes-connus:
+    description: Ligne known_hosts du serveur
+    required: true
+  kubeconfig:
+    description: kubeconfig du compte de service (serveur https://127.0.0.1:6443)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: tunnel et kubeconfig
+      shell: bash
+      env:
+        HOTE: ${{ inputs.hote }}
+        UTILISATEUR: ${{ inputs.utilisateur }}
+        CLE: ${{ inputs.cle }}
+        HOTES_CONNUS: ${{ inputs.hotes-connus }}
+        KUBECONFIG_CONTENU: ${{ inputs.kubeconfig }}
+      run: |
+        set -euo pipefail
+        umask 077
+        d="$RUNNER_TEMP/plateforme"
+        mkdir -p "$d"
+        printf '%s\n' "$CLE" > "$d/cle"
+        printf '%s\n' "$HOTES_CONNUS" > "$d/hotes_connus"
+        printf '%s\n' "$KUBECONFIG_CONTENU" > "$d/kubeconfig"
+
+        ssh -f -N \
+          -i "$d/cle" \
+          -o IdentitiesOnly=yes \
+          -o StrictHostKeyChecking=yes \
+          -o UserKnownHostsFile="$d/hotes_connus" \
+          -o ExitOnForwardFailure=yes \
+          -o ServerAliveInterval=30 \
+          -L 6443:127.0.0.1:6443 \
+          "$UTILISATEUR@$HOTE"
+
+        for _ in $(seq 1 20); do
+          if (exec 3<>/dev/tcp/127.0.0.1/6443) 2>/dev/null; then
+            echo "tunnel ouvert : 127.0.0.1:6443 → API du serveur"
+            break
+          fi
+          sleep 1
+        done
+        (exec 3<>/dev/tcp/127.0.0.1/6443) 2>/dev/null || { echo "::error::le tunnel ne s'est pas ouvert"; exit 1; }
+
+        # Le backend « kubernetes » lit KUBE_CONFIG_PATH ; les providers, la variable.
+        {
+          echo "KUBE_CONFIG_PATH=$d/kubeconfig"
+          echo "TF_VAR_kubeconfig=$d/kubeconfig"
+        } >> "$GITHUB_ENV"

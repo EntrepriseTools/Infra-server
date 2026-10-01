@@ -1,0 +1,34 @@
+# =====================================================================
+# Pod Security Admission — le niveau par DÉFAUT de chaque espace de noms.
+#
+# Trois niveaux (https://kubernetes.io/docs/concepts/security/pod-security-standards/) :
+#   privileged  tout est permis
+#   baseline    pas d'accès à l'hôte (hostNetwork, hostPath, privileged…)
+#   restricted  baseline + non-root, capacités retirées, seccomp…
+#
+# Ici :  baseline est IMPOSÉ partout par défaut ; restricted est SIGNALÉ
+# (avertissement kubectl + journal d'audit). Les espaces de noms des
+# applications sont étiquetés `restricted` par Terraform (module
+# espace-application). Les rares exceptions sont étiquetées une par une,
+# avec leur raison, dans Terraform — jamais ici.
+# =====================================================================
+apiVersion: apiserver.config.k8s.io/v1
+kind: AdmissionConfiguration
+plugins:
+  - name: PodSecurity
+    configuration:
+      apiVersion: pod-security.admission.config.k8s.io/v1
+      kind: PodSecurityConfiguration
+      defaults:
+        enforce: "baseline"
+        enforce-version: "latest"
+        audit: "restricted"
+        audit-version: "latest"
+        warn: "restricted"
+        warn-version: "latest"
+      exemptions:
+        usernames: []
+        runtimeClasses: []
+        # kube-system porte les composants de k3s (CoreDNS, local-path,
+        # metrics-server) : gérés par k3s, pas par nous.
+        namespaces: [kube-system]

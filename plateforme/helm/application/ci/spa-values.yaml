@@ -1,0 +1,25 @@
+# Cas « spa » : écran séparé, TLS par cert-manager (mode direct), 2 répliques.
+image:
+  depot: ghcr.io/entreprisetools/procurement/backend
+  empreinte: sha256:0000000000000000000000000000000000000000000000000000000000000000
+repliques: 2
+variablePort: PORT
+secrets:
+  existant: procurement-secrets
+frontend:
+  actif: true
+  image:
+    depot: ghcr.io/entreprisetools/procurement/frontend
+    tag: 0123456789abcdef0123456789abcdef01234567
+ingress:
+  hote: procurement.example.org
+  tls:
+    actif: true
+  proxysDevant: 0
+  listeBlanche: ["198.51.100.7/32"]
+sauvegardeAvantDeploiement:
+  base: procurement
+  utilisateur:
+    cle: PGUSER
+  motDePasse:
+    cle: PGPASSWORD

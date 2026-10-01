@@ -1,0 +1,165 @@
+# =====================================================================
+# Les identités du PIPELINE dans le cluster — posées par installer-k3s.sh.
+#
+# Deux comptes, deux niveaux, parce qu'une PR n'est pas un merge :
+#
+#   terraform-plan   utilisé par `terraform plan` sur CHAQUE PR.
+#                    LECTURE seulement, et PAS de lecture des Secrets en
+#                    dehors des espaces de noms que Terraform gère lui-même.
+#                    → une PR piégée (un provider ou une data source qui
+#                      exécute du code) ne peut ni rien modifier, ni lire la
+#                      clé de Sealed Secrets, ni les secrets des applications.
+#
+#   terraform-apply  utilisé par `terraform apply`, seulement sur `main`, et
+#                    seulement dans l'environnement GitHub « production »
+#                    (relecteur obligatoire). cluster-admin : il installe
+#                    des CRD, des webhooks, des ClusterRoles.
+#
+# Les jetons sont des Secrets de type service-account-token : ils
+# n'expirent pas. On les fait TOURNER (docs/plateforme/10-exploitation.md) :
+#   kubectl -n terraform-etat delete secret terraform-plan-jeton
+#   kubectl apply -f rbac-pipeline.yaml   # un nouveau jeton est émis
+# =====================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: terraform-etat
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    app.kubernetes.io/part-of: plateforme
+---
+# ─────────────────────────────────────────────────────── terraform-plan
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terraform-plan
+  namespace: terraform-etat
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: terraform-plan-jeton
+  namespace: terraform-etat
+  annotations:
+    kubernetes.io/service-account.name: terraform-plan
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: terraform-plan-lecture
+rules:
+  # Le cœur de l'API, SAUF les secrets (RBAC est additif : on énumère).
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - nodes
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+      - persistentvolumeclaims
+      - persistentvolumes
+      - events
+    verbs: [get, list, watch]
+  # Les groupes d'API des objets que Terraform et les charts posent.
+  - apiGroups:
+      - apps
+      - batch
+      - autoscaling
+      - policy
+      - networking.k8s.io
+      - discovery.k8s.io
+      - rbac.authorization.k8s.io
+      - storage.k8s.io
+      - scheduling.k8s.io
+      - coordination.k8s.io
+      - admissionregistration.k8s.io
+      - apiextensions.k8s.io
+      - apiregistration.k8s.io
+      - cert-manager.io
+      - acme.cert-manager.io
+      - argoproj.io
+      - kyverno.io
+      - policies.kyverno.io
+      - reports.kyverno.io
+      - wgpolicyk8s.io
+      - monitoring.coreos.com
+      - traefik.io
+      - bitnami.com
+    resources: ["*"]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: terraform-plan-lecture
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: terraform-plan-lecture
+subjects:
+  - kind: ServiceAccount
+    name: terraform-plan
+    namespace: terraform-etat
+---
+# Lire les Secrets — rôle réutilisable, lié espace par espace :
+#  - ici, pour terraform-etat (le state est un Secret) ;
+#  - par Terraform lui-même, pour les espaces de noms du socle qu'il gère
+#    (helm range ses « releases » dans des Secrets) — voir socle.tf.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: terraform-plan-secrets
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: terraform-plan-secrets
+  namespace: terraform-etat
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: terraform-plan-secrets
+subjects:
+  - kind: ServiceAccount
+    name: terraform-plan
+    namespace: terraform-etat
+---
+# ─────────────────────────────────────────────────────── terraform-apply
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: terraform-apply
+  namespace: terraform-etat
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: terraform-apply-jeton
+  namespace: terraform-etat
+  annotations:
+    kubernetes.io/service-account.name: terraform-apply
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: terraform-apply-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: terraform-apply
+    namespace: terraform-etat

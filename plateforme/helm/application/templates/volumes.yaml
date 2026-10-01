@@ -1,0 +1,24 @@
+{{- /* Les volumes persistants de l'application (VOLUMES= d'infra).
+       resource-policy keep : un `helm uninstall` ou la suppression de
+       l'Application Argo CD ne doit JAMAIS emporter des données. */ -}}
+{{- $racine := . -}}
+{{- range .Values.volumes }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-%s" (include "application.nom" $racine) .nom }}
+  labels:
+    {{- include "application.etiquettes" $racine | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $racine.Values.classeStockage }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .taille }}
+{{- end }}

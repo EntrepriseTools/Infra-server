@@ -1,0 +1,59 @@
+{{- /* Les middlewares Traefik — ce que faisait le bloc nginx engendré
+       par infra (client_max_body_size, allow/deny, en-têtes). */ -}}
+{{- if .Values.ingress.actif }}
+{{- $nom := include "application.nom" . -}}
+{{- $i := .Values.ingress -}}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $nom }}-corps
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  buffering:
+    # CORPS_MAX d'infra : au-delà, 413.
+    maxRequestBodyBytes: {{ mul $i.corpsMaxMio 1048576 }}
+    # Au-delà de 1 Mio en mémoire, Traefik tamponne sur disque.
+    memRequestBodyBytes: 1048576
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $nom }}-entetes
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  headers:
+    # Qui a répondu, et quelle version : la CI le vérifie depuis Internet
+    # (comme X-Infra-App d'infra).
+    customResponseHeaders:
+      X-Infra-App: {{ $nom | quote }}
+      X-Infra-Version: {{ include "application.version" . | quote }}
+      {{- range $cle, $valeur := $i.entetes }}
+      {{ $cle }}: {{ $valeur | quote }}
+      {{- end }}
+    contentTypeNosniff: true
+    frameDeny: true
+    referrerPolicy: strict-origin-when-cross-origin
+    {{- if $i.tls.actif }}
+    stsSeconds: 31536000
+    stsIncludeSubdomains: false
+    {{- end }}
+{{- if $i.listeBlanche }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ $nom }}-liste-blanche
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  ipAllowList:
+    sourceRange:
+      {{- toYaml $i.listeBlanche | nindent 6 }}
+    {{- if gt (int $i.proxysDevant) 0 }}
+    ipStrategy:
+      depth: {{ $i.proxysDevant }}
+    {{- end }}
+{{- end }}
+{{- end }}

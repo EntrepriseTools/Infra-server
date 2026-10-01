@@ -1,0 +1,89 @@
+{{- /* Mode « spa » : l'écran bâti, servi par une image nginx SANS
+       privilège (nginxinc/nginx-unprivileged, port 8080) — voir
+       modeles/depot-k8s/Dockerfile.frontend. */ -}}
+{{- if .Values.frontend.actif }}
+{{- $nom := include "application.nom" . -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $nom }}-frontend
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: {{ .Values.repliques }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      {{- include "application.selecteur" (dict "racine" . "composant" "frontend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "application.etiquettes" . | nindent 8 }}
+        app.kubernetes.io/component: frontend
+    spec:
+      serviceAccountName: {{ $nom }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ecran
+          image: {{ include "application.image" (dict "image" .Values.frontend.image "quoi" "frontend") | quote }}
+          imagePullPolicy: {{ .Values.frontend.image.politiqueTirage }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.frontend.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.frontend.ressources | nindent 12 }}
+          securityContext:
+            {{- include "application.securiteConteneur" (dict "racineEnLectureSeule" true) | nindent 12 }}
+          volumeMounts:
+            # nginx écrit son pid et ses tampons : seulement là.
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /var/cache/nginx
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $nom }}-frontend
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "application.selecteur" (dict "racine" . "composant" "frontend") | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+{{- end }}

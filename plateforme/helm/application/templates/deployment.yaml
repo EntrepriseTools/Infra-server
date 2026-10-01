@@ -1,0 +1,125 @@
+{{- $nom := include "application.nom" . -}}
+{{- $secret := include "application.secret" . -}}
+{{- $s := .Values.sondes -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $nom }}
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+    app.kubernetes.io/component: backend
+spec:
+  {{- if not .Values.autoscaling.actif }}
+  replicas: {{ .Values.repliques }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  # Une version qui ne devient jamais « prête » en 10 min fait échouer le
+  # déploiement (Argo CD le montre « Degraded ») — l'ANCIENNE continue de
+  # servir : maxUnavailable 0, elle n'est retirée qu'une fois la nouvelle prête.
+  progressDeadlineSeconds: 600
+  strategy:
+    {{- if .Values.volumes }}
+    # Un volume ReadWriteOnce = un seul écrivain : on arrête l'ancienne
+    # version AVANT de lancer la nouvelle (courte coupure, assumée).
+    type: Recreate
+    {{- else }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "application.selecteur" (dict "racine" . "composant" "backend") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "application.etiquettes" . | nindent 8 }}
+        app.kubernetes.io/component: backend
+      annotations:
+        # Les secrets changent → l'empreinte change → les pods sont relancés.
+        plateforme.entreprisetools/empreinte-secrets: {{ toJson .Values.secrets | sha256sum | trunc 16 }}
+        plateforme.entreprisetools/empreinte-env: {{ toJson .Values.env | sha256sum | trunc 16 }}
+    spec:
+      serviceAccountName: {{ $nom }}
+      automountServiceAccountToken: false
+      # Sans cela, Kubernetes injecte une variable par Service de l'espace
+      # (POSTGRES_PORT=tcp://10.43.…) — qui écraserait la configuration
+      # d'une application qui lit justement POSTGRES_PORT.
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ .Values.securite.utilisateur }}
+        runAsGroup: {{ .Values.securite.groupe }}
+        fsGroup: {{ .Values.securite.groupe }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: application
+          image: {{ include "application.image" (dict "image" .Values.image "quoi" "backend") | quote }}
+          imagePullPolicy: {{ .Values.image.politiqueTirage }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.port }}
+              protocol: TCP
+          env:
+            - name: {{ .Values.variablePort }}
+              value: {{ .Values.port | quote }}
+            {{- with .Values.variableAdresse }}
+            - name: {{ . }}
+              value: "0.0.0.0"
+            {{- end }}
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage={{ .Values.jvm.pourcentageRam }} -Djava.io.tmpdir=/tmp"
+            - name: INFRA_VERSION
+              value: {{ include "application.version" . | quote }}
+            {{- range $cle, $valeur := .Values.env }}
+            - name: {{ $cle }}
+              value: {{ $valeur | toString | quote }}
+            {{- end }}
+          {{- if $secret }}
+          envFrom:
+            - secretRef:
+                name: {{ $secret }}
+          {{- end }}
+          startupProbe:
+            httpGet:
+              path: {{ default $s.chemin $s.demarrage.chemin }}
+              port: http
+            periodSeconds: 5
+            failureThreshold: {{ div $s.demarrage.delaiMax 5 }}
+          livenessProbe:
+            httpGet:
+              path: {{ default $s.chemin $s.vivacite.chemin }}
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: {{ default $s.chemin $s.preparation.chemin }}
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.ressources | nindent 12 }}
+          securityContext:
+            {{- include "application.securiteConteneur" .Values.securite | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- range .Values.volumes }}
+            - name: {{ .nom }}
+              mountPath: {{ .chemin }}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 512Mi
+        {{- range .Values.volumes }}
+        - name: {{ .nom }}
+          persistentVolumeClaim:
+            claimName: {{ printf "%s-%s" $nom .nom }}
+        {{- end }}

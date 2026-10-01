@@ -1,0 +1,32 @@
+# Cas « proxy » complet : volumes, secrets scellés, sauvegarde, liste blanche.
+# Utilisé par la CI (helm lint/template + kubeconform) et les tests.
+image:
+  depot: ghcr.io/entreprisetools/hr/paie
+  tag: 0123456789abcdef0123456789abcdef01234567
+variablePort: PAIE_PORT
+variableAdresse: PAIE_ADRESSE
+env:
+  PAIE_URL_PUBLIQUE: https://paie.example.org
+secrets:
+  scelles:
+    PAIE_MOTDEPASSE: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq0000000000000000000000
+    PAIE_UTILISATEUR: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq1111111111111111111111
+volumes:
+  - nom: etat
+    chemin: /var/lib/paie
+    taille: 5Gi
+ingress:
+  hote: paie.example.org
+  listeBlanche: ["203.0.113.0/24"]
+sauvegardeAvantDeploiement:
+  base: paie
+  utilisateur:
+    cle: PAIE_UTILISATEUR
+  motDePasse:
+    cle: PAIE_MOTDEPASSE
+metriques:
+  serviceMonitor: true
+reseau:
+  sorties:
+    - cidr: 0.0.0.0/0
+      ports: [443]

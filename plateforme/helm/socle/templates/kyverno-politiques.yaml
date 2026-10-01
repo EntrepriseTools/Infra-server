@@ -1,0 +1,141 @@
+{{- /* =====================================================================
+       Les politiques d'admission (Kyverno), appliquées aux espaces étiquetés
+       plateforme.entreprisetools/type=application (module Terraform
+       espace-application).
+
+       failureAction :
+         Audit    l'objet est ADMIS, la violation est écrite dans un
+                  PolicyReport :  kubectl get policyreport -A
+         Enforce  l'objet est REFUSÉ, avec le message ci-dessous.
+
+       Kyverno écrit lui-même les variantes pour Deployment, Job, CronJob…
+       (« autogen ») à partir des règles écrites pour Pod : une violation est
+       donc signalée dès le Deployment, avant qu'aucun pod ne soit créé.
+       ===================================================================== */ -}}
+{{- $k := .Values.kyverno -}}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: plateforme-registres
+  annotations:
+    policies.kyverno.io/title: Registres permis
+    policies.kyverno.io/description: >-
+      Une image ne peut venir que d'un registre de la liste. Une image tirée
+      d'un registre inconnu est du code inconnu qui tourne sur le serveur.
+spec:
+  background: true
+  rules:
+    - name: registre-permis
+      {{- include "socle.espacesApplications" . | nindent 6 }}
+      validate:
+        failureAction: {{ $k.action }}
+        message: >-
+          Image refusée : registre hors de la liste ({{ join ", " $k.registresAutorises }}).
+          Publier l'image par le pipeline de l'application (ghcr.io).
+        pattern:
+          spec:
+            =(initContainers):
+              - image: {{ join " | " $k.registresAutorises | quote }}
+            containers:
+              - image: {{ join " | " $k.registresAutorises | quote }}
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: plateforme-etiquettes-images
+  annotations:
+    policies.kyverno.io/title: Pas de « latest »
+    policies.kyverno.io/description: >-
+      « latest » change sous vos pieds : deux pods de la même version peuvent
+      tourner deux codes différents, et un retour arrière ne revient à rien.
+spec:
+  background: true
+  rules:
+    - name: etiquette-ou-empreinte
+      {{- include "socle.espacesApplications" . | nindent 6 }}
+      validate:
+        failureAction: {{ $k.action }}
+        message: "Image sans étiquette ni empreinte : elle vaut « latest ». Utiliser le SHA du commit ou l'empreinte sha256."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "*:* | *@sha256:*"
+            containers:
+              - image: "*:* | *@sha256:*"
+    - name: pas-de-latest
+      {{- include "socle.espacesApplications" . | nindent 6 }}
+      validate:
+        failureAction: {{ $k.action }}
+        message: "L'étiquette « latest » est interdite."
+        pattern:
+          spec:
+            =(initContainers):
+              - image: "!*:latest"
+            containers:
+              - image: "!*:latest"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: plateforme-ressources
+  annotations:
+    policies.kyverno.io/title: Ressources déclarées
+    policies.kyverno.io/description: >-
+      Sur un serveur partagé avec PostgreSQL, un conteneur sans limite de
+      mémoire peut tout prendre. Chaque conteneur déclare ce qu'il demande
+      (requests : l'ordonnanceur réserve) et ce qu'il ne dépassera pas
+      (limits.memory : au-delà, il est tué — lui, pas la base).
+spec:
+  background: true
+  rules:
+    - name: demandes-et-limite-memoire
+      {{- include "socle.espacesApplications" . | nindent 6 }}
+      validate:
+        failureAction: {{ $k.action }}
+        message: "Chaque conteneur doit déclarer resources.requests (cpu, memory) et resources.limits.memory."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: plateforme-signatures
+  annotations:
+    policies.kyverno.io/title: Images signées par la CI
+    policies.kyverno.io/description: >-
+      Les images de l'organisation doivent être SIGNÉES (cosign, sans clé)
+      par un workflow GitHub Actions de l'organisation, sur main. Une image
+      poussée à la main sur GHCR — même avec un jeton volé — n'a pas cette
+      signature : elle est signalée (Audit) ou refusée (Enforce).
+spec:
+  # La vérification interroge Rekor (journal de transparence de Sigstore).
+  webhookTimeoutSeconds: 30
+  background: false
+  rules:
+    - name: signature-github-actions
+      {{- include "socle.espacesApplications" . | nindent 6 }}
+      verifyImages:
+        - imageReferences:
+            {{- toYaml $k.imagesSignees | nindent 12 }}
+          failureAction: {{ $k.action }}
+          # L'image doit être référencée par son empreinte (la CI le fait) :
+          # c'est l'empreinte qui est signée, pas l'étiquette.
+          verifyDigest: true
+          # Réécrire l'étiquette en empreinte n'est permis qu'en Enforce.
+          mutateDigest: {{ eq $k.action "Enforce" }}
+          required: true
+          useCache: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subjectRegExp: {{ $k.identiteSignature | quote }}
+                    rekor:
+                      url: https://rekor.sigstore.dev

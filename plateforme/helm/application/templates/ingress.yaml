@@ -1,0 +1,61 @@
+{{- if .Values.ingress.actif }}
+{{- $nom := include "application.nom" . -}}
+{{- $i := .Values.ingress -}}
+{{- if not $i.hote }}{{ fail "ingress.hote est obligatoire quand ingress.actif est vrai (ex. pilotage.sbp.ma)" }}{{ end -}}
+{{- $middlewares := list (include "application.middleware" (dict "racine" . "nom" "entetes")) (include "application.middleware" (dict "racine" . "nom" "corps")) -}}
+{{- if $i.listeBlanche }}
+{{- $middlewares = prepend $middlewares (include "application.middleware" (dict "racine" . "nom" "liste-blanche")) -}}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $nom }}
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+  annotations:
+    {{- if $i.tls.actif }}
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    cert-manager.io/cluster-issuer: {{ $i.tls.emetteur }}
+    {{- else }}
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+    {{- end }}
+    # L'ordre compte : la liste blanche d'abord (refuser tôt), puis le reste.
+    traefik.ingress.kubernetes.io/router.middlewares: {{ join "," $middlewares }}
+spec:
+  ingressClassName: {{ $i.classe }}
+  {{- if $i.tls.actif }}
+  tls:
+    - hosts: [{{ $i.hote | quote }}]
+      secretName: {{ $nom }}-tls
+  {{- end }}
+  rules:
+    - host: {{ $i.hote | quote }}
+      http:
+        paths:
+          {{- if .Values.frontend.actif }}
+          # Mode spa : l'API au backend, tout le reste à l'écran.
+          - path: {{ .Values.frontend.prefixeApi }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $nom }}
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $nom }}-frontend
+                port:
+                  name: http
+          {{- else }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $nom }}
+                port:
+                  name: http
+          {{- end }}
+{{- end }}

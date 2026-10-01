@@ -1,0 +1,16 @@
+# /etc/systemd/system/k3s-garde.service — charge le garde-barrière de k3s
+# AVANT k3s, et le retire proprement à l'arrêt.
+[Unit]
+Description=Garde-barriere nftables des ports internes de k3s
+Before=k3s.service
+Wants=network-pre.target
+After=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/infra/k3s-garde.nft
+ExecStop=/usr/sbin/nft delete table inet k3s_garde
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,59 @@
+# =====================================================================
+# PAIE (dépôt HR_Management) — traduit de migration/paie/app.conf.
+# La plus critique : migrée EN DERNIER (docs/plateforme/09-migration.md).
+# =====================================================================
+image:
+  depot: ghcr.io/entreprisetools/hr/paie
+  tag: ""
+  empreinte: ""
+
+variablePort: PAIE_PORT
+variableAdresse: PAIE_ADRESSE
+
+# MEMOIRE=2g ; « l'ancien compose n'avait pas de plafond ».
+ressources:
+  requests:
+    cpu: 300m
+    memory: 1536Mi
+  limits:
+    memory: 2Gi
+
+# SONDES="/ /api/moi" : `/` répond depuis le disque même base morte ; seule
+# /api/moi prouve la base → préparation. La vivacité reste sur `/`.
+sondes:
+  chemin: /
+  preparation:
+    chemin: /api/moi
+  demarrage:
+    delaiMax: 300
+
+env:
+  PAIE_URL_PUBLIQUE: https://paie.sbp.ma # À VÉRIFIER : PAIE_URL_PUBLIQUE de /opt/hr/.env
+  PAIE_BASE: jdbc:postgresql://postgres:5432/paie
+  SERVER_FORWARD_HEADERS_STRATEGY: framework
+
+secrets:
+  # À sceller : PAIE_UTILISATEUR, PAIE_MOTDEPASSE
+  scelles: {}
+
+# VOLUMES="paie-etat:/var/lib/paie paie-journaux:/var/lib/paie/journaux"
+# ⚠ Les données des volumes Docker hr_paie-etat / hr_paie-journaux sont à
+#   COPIER dans ces volumes avant la bascule (09-migration.md, « paie »).
+volumes:
+  - nom: etat
+    chemin: /var/lib/paie
+    taille: 10Gi
+  - nom: journaux
+    chemin: /var/lib/paie/journaux
+    taille: 10Gi
+
+ingress:
+  hote: paie.sbp.ma # À VÉRIFIER
+  corpsMaxMio: 32
+
+sauvegardeAvantDeploiement:
+  base: paie
+  utilisateur:
+    cle: PAIE_UTILISATEUR
+  motDePasse:
+    cle: PAIE_MOTDEPASSE

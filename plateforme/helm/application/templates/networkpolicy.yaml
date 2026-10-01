@@ -1,0 +1,27 @@
+{{- /* Le socle (Terraform) ferme tout, puis ouvre DNS, PostgreSQL et
+       l'entrée depuis Traefik. Ici, les sorties PROPRES à l'application
+       (une API externe, un SMTP…), relues en PR comme le reste. */ -}}
+{{- if .Values.reseau.sorties }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "application.nom" . }}-sorties
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes: ["Egress"]
+  egress:
+    {{- range .Values.reseau.sorties }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+      ports:
+        {{- range .ports }}
+        - protocol: TCP
+          port: {{ . }}
+        {{- end }}
+    {{- end }}
+{{- end }}

@@ -1,0 +1,60 @@
+{{- /* =====================================================================
+       Les PROJETS Argo CD — des barrières : ce qu'une Application a le
+       droit de déployer, d'où, et où.
+       ===================================================================== */ -}}
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: applications
+  namespace: {{ .Release.Namespace }}
+spec:
+  description: Les applications métier — chacune dans SON espace, rien au niveau du cluster.
+  # Seul le dépôt GitOps peut être source.
+  sourceRepos:
+    - {{ .Values.gitops.depot | quote }}
+  # Seuls les espaces préparés par Terraform.
+  {{- if .Values.applications }}
+  destinations:
+    {{- range .Values.applications }}
+    - server: https://kubernetes.default.svc
+      namespace: {{ . }}
+    {{- end }}
+  {{- else }}
+  destinations: []
+  {{- end }}
+  # AUCUN objet de niveau cluster (ClusterRole, CRD, Namespace…).
+  clusterResourceWhitelist: []
+  # Ce que la PLATEFORME tient et qu'une application ne doit pas réécrire.
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+  orphanedResources:
+    warn: true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: plateforme
+  namespace: {{ .Release.Namespace }}
+spec:
+  description: Les composants du socle installés par Argo CD (Sealed Secrets).
+  sourceRepos:
+    - https://bitnami-labs.github.io/sealed-secrets
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: sealed-secrets
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+    - group: apiextensions.k8s.io
+      kind: CustomResourceDefinition
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRole
+    - group: rbac.authorization.k8s.io
+      kind: ClusterRoleBinding

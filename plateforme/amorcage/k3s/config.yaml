@@ -1,0 +1,71 @@
+# =====================================================================
+# /etc/rancher/k3s/config.yaml — la configuration du serveur k3s.
+#
+# Posé par installer-k3s.sh AVANT le premier démarrage. Chaque clé est une
+# option de `k3s server` (https://docs.k3s.io/cli/server) : écrire
+# `disable: [traefik]` ici revient à lancer `k3s server --disable traefik`.
+#
+# Les choix, et pourquoi :
+# =====================================================================
+
+# Le kubeconfig administrateur (/etc/rancher/k3s/k3s.yaml) est un passe-partout
+# cluster-admin : lisible par root SEUL.
+write-kubeconfig-mode: "0600"
+
+# etcd embarqué plutôt que SQLite : il apporte les INSTANTANÉS programmés
+# (etcd-snapshot-*) et laisse la porte ouverte à un 2e et 3e nœud un jour.
+cluster-init: true
+etcd-snapshot-schedule-cron: "0 */6 * * *"   # toutes les 6 h
+etcd-snapshot-retention: 28                  # 7 jours
+
+# On retire les composants livrés par défaut que NOUS installons nous-mêmes
+# (Terraform, version épinglée, valeurs relues) :
+#  - traefik   → réinstallé par Terraform (plateforme/terraform/plateforme/ingress.tf)
+#  - servicelb → inutile : pas de Service LoadBalancer, Traefik écoute en hostPort
+disable:
+  - traefik
+  - servicelb
+
+# Les Secrets sont CHIFFRÉS dans etcd (AES-CBC, clé dans
+# /var/lib/rancher/k3s/server/cred/encryption-config.json). Sans cela, un
+# instantané etcd volé = tous les mots de passe en clair.
+secrets-encryption: true
+
+# Le nom du nœud est fixe : il ne doit pas changer si le nom d'hôte change.
+node-name: serveur
+
+# ── API server ───────────────────────────────────────────────────────────
+kube-apiserver-arg:
+  # Pod Security Admission : le niveau PAR DÉFAUT des espaces de noms
+  # (baseline imposé, restricted signalé). Voir admission.yaml.
+  - "admission-control-config-file=/etc/rancher/k3s/admission.yaml"
+  # Journal d'audit : QUI a fait QUOI sur l'API (voir audit.yaml).
+  - "audit-policy-file=/etc/rancher/k3s/audit.yaml"
+  - "audit-log-path=/var/log/k3s/audit.log"
+  - "audit-log-maxage=30"
+  - "audit-log-maxbackup=10"
+  - "audit-log-maxsize=100"
+  # Les jetons de ServiceAccount liés (projected) expirent : 24 h au plus.
+  - "service-account-max-token-expiration=24h"
+
+# ── Contrôleur ───────────────────────────────────────────────────────────
+kube-controller-manager-arg:
+  # Ne pas garder des milliers de pods terminés (Jobs, hooks Argo CD).
+  - "terminated-pod-gc-threshold=50"
+
+# ── kubelet ──────────────────────────────────────────────────────────────
+kubelet-arg:
+  # Une session `kubectl exec` inactive est coupée après 5 min.
+  - "streaming-connection-idle-timeout=5m"
+  # Réserve pour le système et PostgreSQL natif : le kubelet ne promettra
+  # JAMAIS aux pods la mémoire dont la base a besoin.
+  - "system-reserved=cpu=500m,memory=2Gi"
+  - "kube-reserved=cpu=250m,memory=512Mi"
+  # Évince des pods AVANT que le noyau ne tue au hasard (peut-être postgres).
+  - "eviction-hard=memory.available<500Mi,nodefs.available<10%,imagefs.available<10%"
+
+# NB — `protect-kernel-defaults: true` (recommandé par le guide CIS de k3s)
+# n'est PAS activé : il exige vm.overcommit_memory=1, alors que PostgreSQL
+# natif tourne sur cette machine et que sa documentation déconseille ce
+# réglage (l'OOM killer viserait plus volontiers le postmaster).
+# C'est un écart CIS ASSUMÉ — voir docs/plateforme/07-devsecops.md.

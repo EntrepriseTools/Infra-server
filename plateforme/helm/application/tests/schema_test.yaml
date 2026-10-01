@@ -1,0 +1,40 @@
+suite: le schéma des valeurs refuse ce qui est faux
+templates:
+  - deployment.yaml
+set:
+  image.tag: abc1234
+  ingress.hote: app.example.org
+  sauvegardeAvantDeploiement.actif: false
+tests:
+  - it: refuse l'étiquette latest
+    set:
+      image.tag: latest
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuse une clé inconnue (faute de frappe)
+    set:
+      ressource:
+        limits:
+          memory: 1Gi
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuse une limite mémoire absente
+    set:
+      # null RETIRE la clé héritée des valeurs par défaut.
+      ressources.limits.memory: null
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuse un UID système (< 1000)
+    set:
+      securite.utilisateur: 0
+    asserts:
+      - failedTemplate: {}
+
+  - it: refuse une image de sauvegarde hors de la liste
+    set:
+      sauvegardeAvantDeploiement.image: docker.io/bitnami/postgresql:17
+    asserts:
+      - failedTemplate: {}

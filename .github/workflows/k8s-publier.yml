@@ -1,0 +1,368 @@
+# =====================================================================
+# LE workflow de livraison Kubernetes, RÉUTILISABLE — l'équivalent GitOps
+# de deployer.yml. Un dépôt d'application l'APPELLE après ses tests :
+#
+#   publier:
+#     needs: [tests]
+#     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+#     uses: EntrepriseTools/Infra-server/.github/workflows/k8s-publier.yml@v1
+#     with:
+#       application: procurement            # = gitops/applications/<application>/
+#       image: procurement/backend          # → ghcr.io/entreprisetools/procurement/backend
+#       contexte: ./backend
+#       frontend-image: procurement/frontend   # mode spa seulement
+#       url-publique: https://app.purchase.sbp.ma
+#     secrets:
+#       GITOPS_APP_CLIENT_ID: ${{ secrets.GITOPS_APP_CLIENT_ID }}
+#       GITOPS_APP_CLE: ${{ secrets.GITOPS_APP_CLE }}
+#
+# La chaîne, et ce que chaque maillon garantit :
+#
+#   1. construire   l'image <sha>, une fois                    → ce qui est testé est ce qui part
+#   2. scanner      Trivy AVANT de pousser (CVE corrigeables)   → rien de connu-vulnérable n'atteint GHCR
+#   3. pousser      vers GHCR, on retient l'EMPREINTE sha256    → référence immuable
+#   4. signer       cosign SANS clé (OIDC GitHub → Sigstore)    → Kyverno n'admet que ce qui vient d'ICI
+#   5. attester     SBOM (SPDX) ; provenance SLSA si disponible  → d'où vient l'image, ce qu'elle contient
+#   6. promouvoir   commit dans gitops/…/values.yaml            → Argo CD déploie ; `git revert` = retour
+#   7. vérifier     sonde publique : X-Infra-Version == <sha>   → la bonne version répond, depuis Internet
+#
+# AUCUN accès au serveur : pas de clé SSH, pas de kubeconfig. Le pipeline
+# écrit dans Git ; c'est le cluster qui vient chercher (pull).
+#
+# Prérequis (une fois) — docs/plateforme/06-ci-cd-github-actions.md :
+#   - une GitHub App « plateforme-gitops », installée sur Infra-server,
+#     permission Contents: write ; son « Client ID » et sa clé dans les secrets ;
+#   - Infra-server : Settings → Actions → Access → accessible à l'organisation.
+# =====================================================================
+name: k8s · publier (réutilisable)
+
+on:
+  workflow_call:
+    inputs:
+      application:
+        description: "Nom de l'application (= dossier gitops/applications/<application>)"
+        type: string
+        required: true
+      image:
+        description: "Nom de l'image sous ghcr.io/<organisation>/ (ex. board/pilotage)"
+        type: string
+        required: true
+      contexte:
+        description: "Contexte de construction de l'image"
+        type: string
+        default: "."
+      dockerfile:
+        description: "Dockerfile (vide = <contexte>/Dockerfile)"
+        type: string
+        default: ""
+      frontend-image:
+        description: "Mode spa : nom de l'image de l'écran (vide = pas d'écran)"
+        type: string
+        default: ""
+      frontend-contexte:
+        type: string
+        default: "frontend"
+      frontend-dockerfile:
+        type: string
+        default: ""
+      url-publique:
+        description: "Adresse publique à sonder après le déploiement (vide = pas de sonde)"
+        type: string
+        default: ""
+      depot-gitops:
+        description: "Dépôt (de l'organisation) qui porte gitops/"
+        type: string
+        default: "Infra-server"
+      severite-bloquante:
+        description: "Sévérités Trivy qui bloquent la publication"
+        type: string
+        default: "CRITICAL,HIGH"
+      attestations-github:
+        description: >-
+          Attestations GitHub (provenance SLSA, SBOM) poussées dans GHCR.
+          Disponibles pour un dépôt PRIVÉ seulement avec GitHub Enterprise
+          Cloud : laisser false sinon. La signature cosign, elle, est toujours faite.
+        type: boolean
+        default: false
+    secrets:
+      GITOPS_APP_CLIENT_ID:
+        required: true
+      GITOPS_APP_CLE:
+        required: true
+    outputs:
+      sha:
+        description: "Le commit publié"
+        value: ${{ jobs.promouvoir.outputs.sha }}
+
+permissions: {}
+
+env:
+  TRIVY_VERSION: "0.74.0"
+  TRIVY_SHA256: "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a"
+
+jobs:
+  construire:
+    name: image ${{ matrix.composant }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write # pousser vers GHCR
+      id-token: write # jeton OIDC : signature sans clé et attestations
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        composant: ${{ fromJSON(inputs.frontend-image != '' && '["backend","frontend"]' || '["backend"]') }}
+    steps:
+      - name: seulement depuis la branche par défaut
+        # La signature porte l'identité de CE workflow : on refuse de signer
+        # une image bâtie depuis une branche de travail.
+        env:
+          REF: ${{ github.ref }}
+          DEFAUT: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$REF" != "refs/heads/$DEFAUT" ]; then
+            echo "::error::publication refusée depuis $REF : seulement depuis refs/heads/$DEFAUT"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: paramètres
+        id: p
+        env:
+          COMPOSANT: ${{ matrix.composant }}
+          IMAGE: ${{ inputs.image }}
+          CONTEXTE: ${{ inputs.contexte }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          F_IMAGE: ${{ inputs.frontend-image }}
+          F_CONTEXTE: ${{ inputs.frontend-contexte }}
+          F_DOCKERFILE: ${{ inputs.frontend-dockerfile }}
+        run: |
+          proprietaire="${GITHUB_REPOSITORY_OWNER,,}"   # GHCR veut des minuscules
+          if [ "$COMPOSANT" = backend ]; then nom="$IMAGE"; ctx="$CONTEXTE"; df="$DOCKERFILE"
+          else nom="$F_IMAGE"; ctx="$F_CONTEXTE"; df="$F_DOCKERFILE"; fi
+          [[ "$nom" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] || { echo "::error::nom d'image invalide : $nom"; exit 1; }
+          {
+            echo "image=ghcr.io/$proprietaire/$nom"
+            echo "contexte=$ctx"
+            echo "dockerfile=${df:-$ctx/Dockerfile}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: 1. construire (localement, pas encore poussée)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.p.outputs.contexte }}
+          file: ${{ steps.p.outputs.dockerfile }}
+          tags: ${{ steps.p.outputs.image }}:${{ github.sha }}
+          load: true
+          push: false
+          cache-from: type=gha,scope=${{ matrix.composant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.composant }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: 2. scanner (Trivy) — bloque AVANT de pousser
+        env:
+          IMAGE: ${{ steps.p.outputs.image }}:${{ github.sha }}
+          SEVERITE: ${{ inputs.severite-bloquante }}
+        run: |
+          curl -sSfL -o /tmp/trivy.tgz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          echo "${TRIVY_SHA256}  /tmp/trivy.tgz" | sha256sum -c -
+          sudo tar xzf /tmp/trivy.tgz -C /usr/local/bin trivy
+          # --ignore-unfixed : on bloque sur ce qu'on PEUT corriger (mise à
+          # jour de l'image de base ou d'une dépendance), pas sur le reste.
+          trivy image --no-progress --ignore-unfixed \
+            --severity "$SEVERITE" --exit-code 1 \
+            --scanners vuln,secret "$IMAGE"
+
+      - name: 3. pousser (même construction, depuis le cache)
+        id: pousser
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ steps.p.outputs.contexte }}
+          file: ${{ steps.p.outputs.dockerfile }}
+          tags: ${{ steps.p.outputs.image }}:${{ github.sha }}
+          push: true
+          cache-from: type=gha,scope=${{ matrix.composant }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: 4. signer (cosign, sans clé)
+        env:
+          REFERENCE: ${{ steps.p.outputs.image }}@${{ steps.pousser.outputs.digest }}
+        run: |
+          # Le certificat éphémère émis par Fulcio porte l'identité de CE
+          # workflow ; la signature est inscrite dans Rekor (public).
+          cosign sign --yes "$REFERENCE"
+
+      - name: 5a. attester la provenance (SLSA)
+        if: inputs.attestations-github
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.p.outputs.image }}
+          subject-digest: ${{ steps.pousser.outputs.digest }}
+          push-to-registry: true
+
+      - name: 5b. SBOM (SPDX)
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: ${{ steps.p.outputs.image }}@${{ steps.pousser.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.composant }}.spdx.json
+          # Toujours gardé comme artefact de l'exécution (90 jours).
+          upload-artifact: true
+          artifact-name: sbom-${{ matrix.composant }}.spdx.json
+
+      - name: 5c. attester le SBOM
+        if: inputs.attestations-github
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
+        with:
+          subject-name: ${{ steps.p.outputs.image }}
+          subject-digest: ${{ steps.pousser.outputs.digest }}
+          sbom-path: sbom-${{ matrix.composant }}.spdx.json
+          push-to-registry: true
+
+      - name: retenir l'empreinte
+        env:
+          EMPREINTE: ${{ steps.pousser.outputs.digest }}
+          COMPOSANT: ${{ matrix.composant }}
+        run: |
+          mkdir -p empreintes
+          printf '%s\n' "$EMPREINTE" > "empreintes/$COMPOSANT"
+          echo "### $COMPOSANT : \`$EMPREINTE\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: empreinte-${{ matrix.composant }}
+          path: empreintes/${{ matrix.composant }}
+          retention-days: 7
+
+  promouvoir:
+    name: 6. promouvoir (commit GitOps)
+    needs: construire
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    # Deux livraisons de la même application ne s'écrivent pas dessus.
+    concurrency:
+      group: gitops-${{ inputs.application }}
+      cancel-in-progress: false
+    outputs:
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: empreinte-*
+          path: empreintes
+          merge-multiple: true
+
+      - name: jeton de la GitHub App (droits limités à Infra-server)
+        id: jeton
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.GITOPS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.GITOPS_APP_CLE }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ inputs.depot-gitops }}
+          permission-contents: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.repository_owner }}/${{ inputs.depot-gitops }}
+          token: ${{ steps.jeton.outputs.token }}
+          path: depot-gitops
+          persist-credentials: false
+
+      - name: écrire la nouvelle version, commit, push
+        working-directory: depot-gitops
+        env:
+          APP: ${{ inputs.application }}
+          SHA: ${{ github.sha }}
+          SOURCE: ${{ github.repository }}
+          EXECUTION: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JETON: ${{ steps.jeton.outputs.token }}
+          DEPOT: ${{ github.repository_owner }}/${{ inputs.depot-gitops }}
+        run: |
+          f="gitops/applications/$APP/values.yaml"
+          [ -f "$f" ] || { echo "::error::$f absent dans $DEPOT : créer d'abord le dossier (docs/plateforme/04-helm.md)"; exit 1; }
+
+          export EMPREINTE_BACKEND; EMPREINTE_BACKEND="$(cat ../empreintes/backend)"
+          yq -i '.image.tag = strenv(SHA) | .image.empreinte = strenv(EMPREINTE_BACKEND)' "$f"
+          if [ -f ../empreintes/frontend ]; then
+            export EMPREINTE_FRONTEND; EMPREINTE_FRONTEND="$(cat ../empreintes/frontend)"
+            yq -i '.frontend.image.tag = strenv(SHA) | .frontend.image.empreinte = strenv(EMPREINTE_FRONTEND)' "$f"
+          fi
+
+          if git diff --quiet; then
+            echo "rien à changer : cette version est déjà celle de gitops/"
+            exit 0
+          fi
+          git diff
+
+          git config user.name "plateforme-gitops[bot]"
+          git config user.email "plateforme-gitops[bot]@users.noreply.github.com"
+          git commit -q -m "deploy($APP): ${SHA:0:7}" \
+            -m "Source : $SOURCE@$SHA" -m "Exécution : $EXECUTION"
+
+          git remote set-url origin "https://x-access-token:${JETON}@github.com/${DEPOT}.git"
+          # D'autres applications peuvent pousser en même temps : on rejoue
+          # notre commit par-dessus le leur (fichiers différents, pas de conflit).
+          for essai in 1 2 3 4 5; do
+            if git pull -q --rebase origin main && git push -q origin HEAD:main; then
+              echo "promu : $APP → ${SHA:0:7}"
+              echo "### Promu : \`$APP\` → \`${SHA:0:7}\` (Argo CD synchronise sous ~2 min)" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep $((essai * 3))
+          done
+          echo "::error::push impossible après 5 essais"
+          exit 1
+
+  verifier:
+    name: 7. vérifier depuis Internet
+    needs: promouvoir
+    if: inputs.url-publique != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}
+    steps:
+      - name: attendre la nouvelle version
+        env:
+          URL: ${{ inputs.url-publique }}
+          SHA: ${{ github.sha }}
+        run: |
+          # Argo CD relit Git toutes les 2 min ; la sauvegarde avant
+          # déploiement et le démarrage de Spring prennent le reste.
+          # Traefik pose X-Infra-Version (middleware « entetes » du chart).
+          for i in $(seq 1 90); do
+            version="$(curl -sS -o /dev/null -D - --max-time 10 "$URL" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-infra-version" {print $2}')"
+            if [ "$version" = "$SHA" ]; then
+              code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$URL")"
+              case "$code" in
+                2??|3??) echo "✓ $URL répond $code avec la version ${SHA:0:7}"; exit 0 ;;
+                *) echo "version ${SHA:0:7} en place mais $URL répond $code"; exit 1 ;;
+              esac
+            fi
+            echo "[$i/90] version servie : ${version:-?} (attendue ${SHA:0:7})"
+            sleep 10
+          done
+          echo "::error::la version ${SHA:0:7} n'est pas servie après 15 min. Voir Argo CD : application, événements, hook de sauvegarde."
+          exit 1

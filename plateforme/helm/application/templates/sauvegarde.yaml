@@ -1,0 +1,140 @@
+{{- /* =====================================================================
+       La sauvegarde RELUE avant chaque déploiement — le principe n° 3
+       d'infra, porté dans Kubernetes.
+
+       Argo CD joue les hooks « PreSync » AVANT d'appliquer quoi que ce soit.
+       Si le Job échoue, la synchronisation s'arrête : la nouvelle version
+       n'est pas déployée, l'ancienne continue de servir.
+
+         vague -1  le volume des prises (créé une fois, gardé toujours)
+         vague  0  le Job : pg_dump → pg_restore --list (relue) → ménage
+
+       Pour Helm seul (labo, `helm upgrade`) : les annotations helm.sh/hook
+       font la même chose au pre-upgrade.
+       ===================================================================== */ -}}
+{{- $b := .Values.sauvegardeAvantDeploiement -}}
+{{- if $b.actif }}
+{{- $nom := include "application.nom" . -}}
+{{- $secret := include "application.secret" . -}}
+{{- if not $b.base }}{{ fail "sauvegardeAvantDeploiement.base est obligatoire (le nom de la base), ou mettre actif: false" }}{{ end -}}
+{{- if not $b.motDePasse.cle }}{{ fail "sauvegardeAvantDeploiement.motDePasse.cle : la clé du Secret qui porte le mot de passe" }}{{ end -}}
+{{- if not $secret }}{{ fail "sauvegardeAvantDeploiement demande un Secret (secrets.scelles ou secrets.existant)" }}{{ end -}}
+{{- if and (not $b.utilisateur.valeur) (not $b.utilisateur.cle) }}{{ fail "sauvegardeAvantDeploiement.utilisateur : une valeur ou une clé du Secret" }}{{ end -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $nom }}-prises
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "-1"
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with .Values.classeStockage }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $b.taille }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $nom }}-sauvegarde
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+    app.kubernetes.io/component: sauvegarde
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "application.etiquettes" . | nindent 8 }}
+        app.kubernetes.io/component: sauvegarde
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $nom }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        # 70 = postgres dans l'image alpine officielle.
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pg-dump
+          image: {{ $b.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGHOST
+              value: {{ $b.hote | quote }}
+            - name: PGPORT
+              value: {{ $b.port | quote }}
+            - name: PGDATABASE
+              value: {{ $b.base | quote }}
+            - name: PGUSER
+              {{- if $b.utilisateur.valeur }}
+              value: {{ $b.utilisateur.valeur | quote }}
+              {{- else }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $b.utilisateur.cle }}
+              {{- end }}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $b.motDePasse.cle }}
+            - name: VERSION
+              value: {{ include "application.version" . | quote }}
+            - name: GARDER
+              value: {{ $b.garder | quote }}
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              f="/prises/$(date -u +%Y%m%dT%H%M%SZ)-avant-${VERSION}.dump"
+              echo "prise de ${PGDATABASE} → ${f}"
+              pg_dump -Fc -Z6 --no-owner --no-privileges -f "${f}.partiel"
+              # RELUE : une prise qu'on ne sait pas lire n'est pas une prise.
+              n="$(pg_restore --list "${f}.partiel" | grep -c ' TABLE DATA ' || true)"
+              mv "${f}.partiel" "${f}"
+              echo "relue : ${n} tables ; $(du -h "${f}" | cut -f1)"
+              # Ménage : on garde les GARDER plus récentes.
+              ls -1t /prises/*.dump | tail -n +$((GARDER + 1)) | xargs -r rm -f
+              echo "prises gardées : $(ls -1 /prises/*.dump | wc -l)"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            {{- include "application.securiteConteneur" (dict "racineEnLectureSeule" true) | nindent 12 }}
+          volumeMounts:
+            - name: prises
+              mountPath: /prises
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: prises
+          persistentVolumeClaim:
+            claimName: {{ $nom }}-prises
+        - name: tmp
+          emptyDir: {}
+{{- end }}

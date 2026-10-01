@@ -1,5 +1,346 @@
 # Infra-server
 
+**Le dépôt de déploiement des applications d'EntrepriseTools** — paie
+(HR_Management), pilotage (board) et procurement (Purchase_Management) — sur
+un serveur Debian unique.
+
+Il porte **deux voies de déploiement**, qui **coexistent** sur le même serveur
+et la même base PostgreSQL :
+
+| | **Voie `infra`** (en service) | **Voie Kubernetes** (la plateforme) |
+|---|---|---|
+| En une phrase | un outil Bash, `infra`, dont chaque commande est un verbe | un cluster k3s piloté par Terraform, Helm et Argo CD (GitOps) |
+| Les conteneurs | Docker Compose, engendré par root | pods Kubernetes, décrits par un chart Helm commun |
+| Le déploiement | la CI pousse une archive par SSH : `infra livrer` | la CI écrit dans Git ; Argo CD, dans le cluster, applique (*pull*) |
+| L'entrée HTTP | nginx de l'hôte, bloc engendré | Traefik (derrière nginx tant que les deux voies coexistent) |
+| La base | PostgreSQL natif | **le même** PostgreSQL natif |
+| Les secrets | `/etc/infra/secrets/<app>.env` (root 0600) | chiffrés dans Git (Sealed Secrets) |
+| La sécurité de la livraison | clé SSH bridée, empreinte du serveur vérifiée | images scannées (Trivy), **signées** (cosign), vérifiées à l'admission (Kyverno) |
+| Le retour arrière | `infra revenir <app>` | `git revert` du commit de déploiement |
+| Pour qui, pour quoi | la production d'aujourd'hui : simple, éprouvé | apprendre l'outillage standard (Kubernetes, Terraform, Helm, DevSecOps) et préparer la croissance |
+| Documentation | la **[partie B](#partie-b--la-voie-infra)** de ce fichier | la **[partie A](#partie-a--la-plateforme-kubernetes)** de ce fichier, puis **[docs/plateforme/](docs/plateforme/00-LISEZMOI.md)** |
+
+**Où en est-on ?** Les trois applications sont livrées par `infra`. La
+plateforme Kubernetes est dans le dépôt, testée par la CI, et **pas encore
+installée sur le serveur**. On y fait passer les applications **une par une**
+— pilotage d'abord, paie en dernier — avec un retour arrière possible à
+chaque étape ([migration](docs/plateforme/09-migration.md)).
+
+---
+
+## Sommaire
+
+**Partie A — La plateforme Kubernetes**
+
+- [A.1 Pourquoi une plateforme Kubernetes sur un seul serveur](#a1-pourquoi-une-plateforme-kubernetes-sur-un-seul-serveur)
+- [A.2 L'architecture en un schéma](#a2-larchitecture-en-un-schéma)
+- [A.3 Chaque outil, son rôle, et pourquoi lui](#a3-chaque-outil-son-rôle-et-pourquoi-lui)
+- [A.4 Ce qui se passe quand on pousse du code](#a4-ce-qui-se-passe-quand-on-pousse-du-code)
+- [A.5 Ce qui se passe quand on change la plateforme](#a5-ce-qui-se-passe-quand-on-change-la-plateforme)
+- [A.6 La sécurité, couche par couche](#a6-la-sécurité-couche-par-couche)
+- [A.7 Les workflows GitHub Actions](#a7-les-workflows-github-actions)
+- [A.8 Démarrer : le labo, puis le serveur](#a8-démarrer--le-labo-puis-le-serveur)
+- [A.9 Les commandes du quotidien](#a9-les-commandes-du-quotidien)
+- [A.10 Où est quoi dans le dépôt](#a10-où-est-quoi-dans-le-dépôt)
+- [A.11 Ce qui reste à faire](#a11-ce-qui-reste-à-faire)
+
+**Partie B — La voie `infra`**
+
+1. [Pourquoi ni Helm ni Terraform](#1-pourquoi-ni-helm-ni-terraform)
+2. [Les idées qui tiennent tout](#2-les-idées-qui-tiennent-tout)
+3. [Installer infra sur le serveur (une fois)](#3-installer-infra-sur-le-serveur-une-fois)
+4. [Mettre une application en service](#4-mettre-une-application-en-service)
+5. [Les verbes](#5-les-verbes)
+6. [Le manifeste — `deploiement/app.conf`](#6-le-manifeste--deploiementappconf)
+7. [La fiche serveur — `/etc/infra/apps/<app>.conf`](#7-la-fiche-serveur--etcinfraappsappconf)
+8. [Les secrets — `/etc/infra/secrets/<app>.env`](#8-les-secrets--etcinfrasecretsappenv)
+9. [Le workflow réutilisable](#9-le-workflow-réutilisable)
+10. [Un déploiement, pas à pas](#10-un-déploiement-pas-à-pas)
+11. [Sécurité : qui peut quoi](#11-sécurité--qui-peut-quoi)
+12. [Sauvegardes et restauration](#12-sauvegardes-et-restauration)
+13. [Ce qui est où, sur le serveur](#13-ce-qui-est-où-sur-le-serveur)
+14. [Tests : le banc et la preuve négative](#14-tests--le-banc-et-la-preuve-négative)
+15. [Migrer les trois applications](#15-migrer-les-trois-applications)
+16. [Dépannage](#16-dépannage)
+17. [Ce qui n'est pas fait](#17-ce-qui-nest-pas-fait)
+18. [Arborescence du dépôt](#18-arborescence-du-dépôt)
+
+---
+
+# Partie A — La plateforme Kubernetes
+
+Cette partie explique **ce qu'est la plateforme, comment elle fonctionne et
+comment s'en servir**. Chaque sujet est ensuite approfondi dans
+[docs/plateforme/](docs/plateforme/00-LISEZMOI.md) (13 chapitres, un parcours
+d'apprentissage sur 6 semaines et 15 travaux pratiques).
+
+## A.1 Pourquoi une plateforme Kubernetes sur un seul serveur
+
+La [partie B, §1](#1-pourquoi-ni-helm-ni-terraform) explique pourquoi `infra`
+suffit pour un serveur et trois applications — et ce raisonnement reste
+juste. La plateforme existe pour deux autres raisons, assumées :
+
+1. **Apprendre** l'outillage que l'industrie utilise (Kubernetes, Terraform,
+   Helm, GitOps, signature d'images, politiques d'admission) sur un vrai
+   système, plutôt que sur des exemples jetables.
+2. **Anticiper** : le jour où il faut un deuxième serveur, de la haute
+   disponibilité ou une application de plus, le travail est déjà fait.
+
+Trois règles la gardent raisonnable :
+
+- **Rien n'est cassé** : `infra` reste en service ; les deux voies coexistent.
+- **Les données ne bougent pas** : PostgreSQL reste natif, hors du cluster.
+  Supprimer tout le cluster ne supprime aucune base.
+- **Tout passe d'abord par le labo** : la plateforme entière tourne sur votre
+  poste (`plateforme/labo/labo.sh`), avec le même code.
+
+## A.2 L'architecture en un schéma
+
+```
+                       ┌──────────────────────────── GitHub ────────────────────────────┐
+  Dépôt d'application  │ pipeline.yml ──uses──▶ Infra-server/k8s-publier.yml             │
+  (board, HR, Purchase)│   tests       construire → scanner → pousser GHCR → signer      │
+                       │               → SBOM → commit dans gitops/ ────────────────┐   │
+  Dépôt Infra-server   │ plateforme-qualite.yml   tests, lint, scans (chaque PR)     │   │
+                       │ plateforme-terraform.yml plan (PR) / apply (main, approuvé) │   │
+                       │ gitops/applications/<app>/values.yaml ◀────────────────────┘   │
+                       └───────────────────────────────▲───────────────────┬────────────┘
+                                   Argo CD LIT Git ────┘                   │ tunnel SSH
+  ┌──────────────────────────────── SERVEUR ──────────────────────────────┼─────────────┐
+  │ Internet :443 ─▶ nginx de l'hôte ─┬─▶ applications encore sur `infra` (Compose)      │
+  │                  (TLS, certbot)   └─▶ Traefik 10.43.0.80 ─▶ Service ─▶ pods          │
+  │                                                                       ▼             │
+  │  ┌──────────────── k3s (Kubernetes) ────────────────────────┐   API (127.0.0.1)     │
+  │  │ socle, par Terraform : traefik · cert-manager · argocd ·  │                       │
+  │  │                        kyverno · observabilite           │                       │
+  │  │ par Argo CD          : sealed-secrets · pilotage ·        │                       │
+  │  │                        procurement · paie                 │                       │
+  │  └──────────────────────────────────┬───────────────────────┘                       │
+  │  PostgreSQL NATIF ◀── Service « postgres » de chaque espace d'application            │
+  └─────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+Trois couches, trois outils, trois rythmes :
+
+| Couche | Contenu | Outil | Change… | Appliqué par |
+|---|---|---|---|---|
+| **Le cluster** | k3s, pare-feu, comptes du pipeline | scripts `plateforme/amorcage/` | rarement | un humain, en SSH |
+| **Le socle** | Traefik, cert-manager, Argo CD, Kyverno, supervision, un espace par application | **Terraform** | toutes les quelques semaines | GitHub Actions, **après approbation** |
+| **Les applications** | Deployment, Service, Ingress, secrets, sauvegarde | **Helm** + **Argo CD** | plusieurs fois par jour | Argo CD, depuis Git |
+
+Pourquoi trois couches ? Parce que les risques diffèrent : une erreur dans le
+socle peut couper toutes les applications, elle passe donc par un `plan` relu
+et une approbation humaine. Une nouvelle version d'application est fréquente
+et réversible : un simple commit suffit.
+
+## A.3 Chaque outil, son rôle, et pourquoi lui
+
+| Outil | Ce qu'il fait ici | Pourquoi lui (et pas un autre) |
+|---|---|---|
+| **k3s** | Kubernetes complet en un binaire, avec etcd embarqué (instantanés toutes les 6 h) | léger, certifié CNCF, cohabite avec Docker ; kubeadm demanderait plus d'entretien pour le même résultat |
+| **Terraform** | décrit le socle comme du code ; son *state* est stocké dans le cluster (Secret chiffré, verrouillé pendant un apply) | standard de l'IaC ; le code passe aussi avec OpenTofu |
+| **Helm** | un chart **commun** (`plateforme/helm/application`) + des valeurs par application — l'équivalent du `app.conf` d'`infra` | un seul code testé (30 tests unitaires, schéma strict des valeurs), N applications |
+| **Argo CD** | lit `gitops/` et fait converger le cluster ; défait toute modification manuelle (*selfHeal*) | modèle *pull* : la CI n'a **aucun** accès au cluster ; Git devient le journal d'audit et le bouton « retour » |
+| **Traefik** | contrôleur d'entrée HTTP (taille max des requêtes, en-têtes de sécurité, liste blanche) | celui de k3s ; ingress-nginx a atteint sa fin de maintenance en mars 2026 |
+| **cert-manager** | émet et renouvelle les certificats Let's Encrypt (le jour où Traefik prend 80/443) | standard Kubernetes |
+| **Kyverno** | refuse (ou signale) les images non signées, hors registre, en `latest`, sans limites de ressources | politiques en YAML, vérification de signatures intégrée |
+| **Sealed Secrets** | chiffre les secrets avec la clé publique du cluster : on peut les committer | pas de coffre à héberger ; installé **par Argo CD** pour que le compte du `plan` Terraform ne puisse jamais lire sa clé |
+| **Prometheus / Grafana** | métriques, tableaux, alertes (certificat qui expire, sauvegarde échouée, application dégradée) | kube-prometheus-stack, taillé pour un serveur ; facultatif |
+| **Trivy, cosign, zizmor** | scan des images et de la configuration ; signature sans clé ; audit des workflows | la chaîne d'approvisionnement logicielle (voir A.6) |
+
+Ce qui reste **hors** du cluster, volontairement : PostgreSQL et ses
+sauvegardes quotidiennes (`infra sauvegarder`), nginx et certbot pendant la
+coexistence.
+
+## A.4 Ce qui se passe quand on pousse du code
+
+Un développeur pousse sur `main` dans le dépôt `board` :
+
+1. **Tests** — ceux de l'application (ils restent à elle).
+2. **`k8s-publier.yml`** (workflow commun d'Infra-server) :
+   1. construit l'image `ghcr.io/entreprisetools/board/pilotage:<sha>` ;
+   2. la **scanne avec Trivy** *avant* de la pousser : une faille corrigeable
+      HIGH/CRITICAL arrête tout, rien n'atteint le registre ;
+   3. la pousse sur GHCR et retient son **empreinte** `sha256:…` (immuable,
+      contrairement à une étiquette) ;
+   4. la **signe avec cosign, sans clé** : un certificat éphémère prouve
+      « signé par `Infra-server/k8s-publier.yml@v1` », inscrit dans le journal
+      public Rekor ;
+   5. produit le **SBOM** (la liste de tout ce que contient l'image) ;
+   6. écrit `image.tag` et `image.empreinte` dans
+      `gitops/applications/pilotage/values.yaml` — un commit
+      `deploy(pilotage): <sha>` signé par une GitHub App au jeton d'une heure.
+3. **Argo CD** voit le commit (≤ 2 min) :
+   1. **avant tout**, un Job fait un `pg_dump` de la base et le **relit**
+      (`pg_restore --list`) — le principe d'`infra`, gardé. S'il échoue, rien
+      n'est déployé ;
+   2. il applique le nouveau Deployment. **Kyverno** vérifie la signature, le
+      registre et les ressources ; **Pod Security** vérifie non-root et sans
+      privilège ;
+   3. le nouveau pod ne reçoit du trafic qu'une fois sa sonde de préparation
+      verte. L'ancien n'est retiré qu'à ce moment-là. S'il ne devient jamais
+      prêt, l'ancien continue de servir.
+4. **Vérification** : le workflow interroge l'adresse publique jusqu'à lire
+   `X-Infra-Version: <sha>`.
+
+**Revenir en arrière** : `git revert` du commit `deploy(pilotage): …` →
+Argo CD redéploie l'empreinte précédente (la sauvegarde est refaite avant).
+
+## A.5 Ce qui se passe quand on change la plateforme
+
+1. PR sur Infra-server qui touche `plateforme/terraform/` :
+   - **qualité** : `terraform fmt`, `validate`, **`terraform test`** (15 tests,
+     providers simulés), tflint, trivy ;
+   - **plan** : le workflow ouvre un tunnel SSH vers l'API, se connecte avec le
+     compte **`terraform-plan`** (lecture seule) et publie le plan en
+     commentaire de la PR.
+2. Merge sur `main` → **apply**, dans l'environnement GitHub `production` :
+   le travail **attend qu'un relecteur approuve**, puis applique *exactement*
+   le plan calculé, avec le compte `terraform-apply`.
+
+Pourquoi deux comptes ? `terraform plan` exécute du code venu de la PR. Avec
+un compte en lecture seule, qui ne peut lire ni les secrets des applications
+ni la clé de Sealed Secrets, une PR piégée ne peut rien casser ni voler.
+
+## A.6 La sécurité, couche par couche
+
+| Couche | Ce qui protège | Contre quoi |
+|---|---|---|
+| **Hôte** | garde nftables : API (6443), kubelet, etcd, VXLAN et PostgreSQL fermés vers Internet ; API joignable **seulement** par un tunnel SSH bridé | un scan de ports, un accès direct à l'API |
+| **Cluster** | journal d'audit de l'API ; Secrets chiffrés dans etcd ; Pod Security `baseline` par défaut | une action non tracée ; un instantané volé |
+| **Espace d'application** | Pod Security **`restricted`** ; quotas ; NetworkPolicy « tout refusé » puis DNS, base et Traefik seulement | une application qui déborde ou qui cherche à atteindre les autres |
+| **Admission** | Kyverno : signature, registre, pas de `latest`, ressources déclarées | une image poussée à la main, même avec un jeton volé |
+| **Pod** | UID 10001, capacités retirées, seccomp, racine en lecture seule, aucun jeton d'API | un conteneur compromis qui veut devenir root |
+| **Chaîne de livraison** | actions GitHub épinglées par SHA ; binaires vérifiés par somme SHA-256 ; Trivy ; SBOM ; zizmor sur tous les workflows | une dépendance ou une action GitHub piégée (cas réel : mars 2026) |
+| **Privilèges** | CI des applications sans accès au cluster ; AppProject Argo CD sans objets de cluster ; plan en lecture seule ; apply approuvé | une PR ou une valeur malveillante |
+
+Les écarts assumés (par exemple pas de limite CPU, ou PostgreSQL qui écoute
+sur l'IP de l'hôte, derrière le pare-feu) sont écrits et justifiés dans
+[07-devsecops.md](docs/plateforme/07-devsecops.md#7-les-écarts-assumés-une-sécurité-honnête-les-écrit).
+
+Kyverno démarre en mode **Audit** (il signale sans refuser). On lit les
+rapports, puis on passe en **Enforce** (`kyverno_action` dans
+`terraform.tfvars`).
+
+## A.7 Les workflows GitHub Actions
+
+| Workflow | Quand | Ce qu'il fait | Touche au cluster ? |
+|---|---|---|---|
+| `plateforme-qualite.yml` | chaque PR, chaque push | Terraform (fmt, validate, test, tflint), Helm (lint, unittest, kubeconform), trivy, zizmor, shellcheck ; le travail **`garde (qualité)`** les résume | non |
+| `plateforme-terraform.yml` | PR → plan ; `main` → apply approuvé | le socle ; sans les secrets, le plan dit « Plateforme non raccordée » au lieu d'échouer | oui, par tunnel SSH |
+| `k8s-publier.yml` | appelé par les dépôts d'application | construire, scanner, pousser, signer, SBOM, promouvoir, vérifier | **non** (écrit dans Git) |
+| `ci.yml`, `deployer.yml` | voie `infra` | voir la partie B | — |
+
+**Contrôles à rendre obligatoires** sur `main` : `garde (qualité)` et
+`shellcheck et banc`.
+
+Les secrets à créer (détail et valeurs :
+[06-ci-cd-github-actions.md §2](docs/plateforme/06-ci-cd-github-actions.md#2-mise-en-route-une-fois-pas-à-pas)) :
+
+| Où | Nom | Rôle |
+|---|---|---|
+| Infra-server | `PLATEFORME_SSH_HOST`, `_USER`, `_KEY`, `_KNOWN_HOSTS` | le tunnel vers l'API |
+| Infra-server | `ARGOCD_CLE_DEPOT`, `ARGOCD_ADMIN_BCRYPT` | l'accès d'Argo CD au dépôt, son mot de passe admin (empreinte seulement) |
+| environnement `plateforme-plan` | `PLATEFORME_KUBECONFIG_PLAN` | compte en lecture seule |
+| environnement `production` (**relecteur obligatoire**) | `PLATEFORME_KUBECONFIG_APPLY` | compte administrateur |
+| organisation | `GITOPS_APP_CLIENT_ID`, `GITOPS_APP_CLE` | la GitHub App qui écrit les promotions dans `gitops/` |
+
+> ⚠ Créer l'environnement `production` **avec un relecteur obligatoire** avant
+> de poser les secrets : un environnement créé automatiquement par GitHub n'a
+> aucune protection.
+
+## A.8 Démarrer : le labo, puis le serveur
+
+**1. Sur votre poste — le labo** (docker, [k3d](https://k3d.io), kubectl,
+helm, terraform) :
+
+```bash
+plateforme/labo/labo.sh creer       # cluster k3d + PostgreSQL dans Docker
+export TF_VAR_argocd_cle_depot="$(cat ~/.ssh/argocd-depot)"
+export TF_VAR_argocd_admin_bcrypt="$(htpasswd -nbBC 12 '' labo | tr -d ':\n')"
+plateforme/labo/labo.sh appliquer   # tout le socle, avec le même Terraform
+plateforme/labo/labo.sh argocd      # l'interface sur http://localhost:8080
+make -C plateforme tout             # les contrôles de la CI, en local
+```
+
+Suivre ensuite les [travaux pratiques](docs/plateforme/11-travaux-pratiques.md).
+
+**2. Sur le serveur** (en root) :
+
+```bash
+sudo plateforme/amorcage/installer-k3s.sh --pare-feu            # k3s durci + garde nftables
+sudo plateforme/amorcage/compte-tunnel-ci.sh                    # le tunnel de la CI (4 secrets)
+sudo plateforme/amorcage/kubeconfig-pipeline.sh terraform-plan  # → PLATEFORME_KUBECONFIG_PLAN
+sudo plateforme/amorcage/kubeconfig-pipeline.sh terraform-apply # → PLATEFORME_KUBECONFIG_APPLY
+sudo plateforme/amorcage/identifiants-registre.sh <robot>       # tirer les images de GHCR
+sudo plateforme/amorcage/ouvrir-postgres-aux-pods.sh            # puis redémarrer PostgreSQL au calme
+```
+
+**3. Dans GitHub** : environnements, secrets, GitHub App, étiquette `v1`
+([06 §2](docs/plateforme/06-ci-cd-github-actions.md)). Puis lancer
+`plateforme · terraform` sur `main` et **approuver** l'apply.
+
+**4. Migrer pilotage**, puis procurement, puis paie
+([09-migration.md](docs/plateforme/09-migration.md)) : nom de test,
+vérification, bascule en quelques secondes, retour arrière possible.
+
+## A.9 Les commandes du quotidien
+
+| Je veux… | Je fais… |
+|---|---|
+| déployer une version | pousser sur `main` dans le dépôt de l'application |
+| revenir en arrière | `git revert` du commit `deploy(<app>): …` dans Infra-server |
+| changer la mémoire, une variable, le nom public | PR sur `gitops/applications/<app>/values.yaml` |
+| changer un secret | `plateforme/outils/sceller.sh <app> fichier.env`, coller le bloc, PR |
+| ajouter une application | une entrée dans `terraform.tfvars`, puis un dossier `gitops/applications/<app>/` ([04 §6](docs/plateforme/04-helm.md#6-ajouter-une-application-pas-à-pas)) |
+| voir l'état | `sudo k3s kubectl -n argocd get applications` · `sudo k3s kubectl get pods -A` |
+| lire les journaux | `sudo k3s kubectl -n <app> logs deploy/<app> -f` |
+| voir les violations de politique | `sudo k3s kubectl get policyreport -A` |
+| ouvrir Argo CD ou Grafana | par tunnel SSH ([05 §5](docs/plateforme/05-gitops-argocd.md#5-accéder-à-linterface), [08 §2](docs/plateforme/08-observabilite.md)) |
+| réparer | [10-exploitation.md](docs/plateforme/10-exploitation.md) : dépannage par symptôme, restaurations, reconstruction complète |
+
+## A.10 Où est quoi dans le dépôt
+
+```
+plateforme/
+  amorcage/          ce que Terraform ne peut pas faire : k3s durci, pare-feu, comptes et tunnel
+                     de la CI, PostgreSQL ouvert aux pods, pont nginx (coexistence)
+  terraform/
+    modules/espace-application/   un espace prêt : Pod Security, quotas, réseau fermé, Service « postgres »
+    plateforme/                   le socle : Traefik, cert-manager, Argo CD, Kyverno, supervision
+  helm/
+    application/     LE chart commun des applications (+ tests unitaires, schéma des valeurs)
+    socle/           politiques Kyverno, émetteurs TLS, projets et ApplicationSet Argo CD
+  outils/sceller.sh  chiffrer un secret pour le cluster
+  labo/              la plateforme sur votre poste (k3d)
+  Makefile           les contrôles de la CI en local (make tout)
+gitops/applications/<app>/values.yaml   l'état voulu de chaque application, lu par Argo CD
+modeles/depot-k8s/   le modèle de dépôt d'application (pipeline, Dockerfile non-root, écran)
+docs/plateforme/     la documentation détaillée et le parcours d'apprentissage
+renovate.json        les mises à jour de dépendances, proposées en PR chaque lundi
+```
+
+## A.11 Ce qui reste à faire
+
+- **Installer la plateforme sur le serveur** (A.8) : rien n'a encore tourné
+  sur un vrai cluster. Le code est validé par la CI (tests Terraform et Helm,
+  schémas Kubernetes stricts, scans), mais les valeurs passées aux charts
+  tiers ne sont éprouvées qu'à l'installation : le labo est fait pour ça.
+- **Remplacer les valeurs « À VÉRIFIER »** dans `gitops/applications/*/values.yaml`
+  (noms publics de pilotage et paie, base de procurement) et `courriel_acme`
+  dans `terraform.tfvars`.
+- **Sauvegarder hors du serveur** la clé privée de Sealed Secrets dès
+  l'installation ([10 §4](docs/plateforme/10-exploitation.md)).
+- **Brancher Alertmanager** sur un vrai canal (courriel) : les alertes existent,
+  personne n'est encore prévenu.
+- **Passer Kyverno en Enforce** une fois les rapports propres.
+- Plus tard : mode direct (Traefik sur 80/443), journaux centralisés (Loki),
+  déploiements progressifs (Argo Rollouts), un deuxième nœud.
+
+---
+
+# Partie B — La voie `infra`
+
 **Une seule façon de déployer, pour toutes les applications d'EntrepriseTools.**
 
 - Sur le serveur, un outil, `infra`, dont chaque commande est un **verbe** :
@@ -30,29 +371,6 @@ avaient dérivé. L'audit qui l'a motivé est dans **[AUDIT.md](AUDIT.md)**.
  Internet ─▶ nginx de l'hôte :80/:443 ─┬─▶ 127.0.0.1:<port> ─▶ conteneur (réseau de l'hôte) ─▶ PostgreSQL natif
                                         └─▶ /var/lib/infra/<app>/ecran/courant   (mode spa)
 ```
-
----
-
-## Sommaire
-
-1. [Pourquoi ni Helm ni Terraform](#1-pourquoi-ni-helm-ni-terraform)
-2. [Les idées qui tiennent tout](#2-les-idées-qui-tiennent-tout)
-3. [Installer infra sur le serveur (une fois)](#3-installer-infra-sur-le-serveur-une-fois)
-4. [Mettre une application en service](#4-mettre-une-application-en-service)
-5. [Les verbes](#5-les-verbes)
-6. [Le manifeste — `deploiement/app.conf`](#6-le-manifeste--deploiementappconf)
-7. [La fiche serveur — `/etc/infra/apps/<app>.conf`](#7-la-fiche-serveur--etcinfraappsappconf)
-8. [Les secrets — `/etc/infra/secrets/<app>.env`](#8-les-secrets--etcinfrasecretsappenv)
-9. [Le workflow réutilisable](#9-le-workflow-réutilisable)
-10. [Un déploiement, pas à pas](#10-un-déploiement-pas-à-pas)
-11. [Sécurité : qui peut quoi](#11-sécurité--qui-peut-quoi)
-12. [Sauvegardes et restauration](#12-sauvegardes-et-restauration)
-13. [Ce qui est où, sur le serveur](#13-ce-qui-est-où-sur-le-serveur)
-14. [Tests : le banc et la preuve négative](#14-tests--le-banc-et-la-preuve-négative)
-15. [Migrer les trois applications](#15-migrer-les-trois-applications)
-16. [Dépannage](#16-dépannage)
-17. [Ce qui n'est pas fait](#17-ce-qui-nest-pas-fait)
-18. [Arborescence du dépôt](#18-arborescence-du-dépôt)
 
 ---
 
@@ -95,7 +413,7 @@ Helm demanderait.
 > y migre une application à la fois, avec un retour arrière à chaque étape.
 > Les raisons ci-dessus restent vraies ; la plateforme est un choix
 > d'apprentissage et d'anticipation, assumé comme tel.
-> → **[docs/plateforme/](docs/plateforme/00-LISEZMOI.md)**
+> → **[Partie A](#partie-a--la-plateforme-kubernetes)** et **[docs/plateforme/](docs/plateforme/00-LISEZMOI.md)**
 
 ---
 
@@ -634,7 +952,8 @@ projet compose), même port, même fichier nginx.
   propre à HR_Management et n'est pas reprise par `infra`. Voir la migration.
 - **La voie native de la paie** (`paie_kotlin/deploiement/debian/`, gelée)
   n'est pas touchée.
-- **Plusieurs serveurs** : `infra` en gère un. Voir [§1](#1-pourquoi-ni-helm-ni-terraform).
+- **Plusieurs serveurs** : `infra` en gère un. Voir [§1](#1-pourquoi-ni-helm-ni-terraform)
+  et la [plateforme Kubernetes](#partie-a--la-plateforme-kubernetes).
 - **Rien n'a encore tourné sur le vrai serveur.** Le banc et la preuve
   négative éprouvent la logique contre des doubles. Le premier passage réel
   se fait application par application, en suivant la migration, en

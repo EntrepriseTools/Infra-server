@@ -1,0 +1,109 @@
+# =====================================================================
+# Tests unitaires du chart (helm-unittest) : on REND les gabarits avec des
+# valeurs choisies et on vérifie le résultat — sans cluster.
+#   helm unittest plateforme/helm/application
+# =====================================================================
+suite: le Deployment du backend
+templates:
+  - deployment.yaml
+release:
+  name: pilotage
+  namespace: pilotage
+capabilities:
+  majorVersion: "1"
+  minorVersion: "33"
+set:
+  image.depot: ghcr.io/entreprisetools/board/pilotage
+  image.tag: 0123456789abcdef0123456789abcdef01234567
+  ingress.hote: pilotage.example.org
+tests:
+  - it: tire l'image par son étiquette (le SHA)
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/entreprisetools/board/pilotage:0123456789abcdef0123456789abcdef01234567
+
+  - it: préfère l'empreinte à l'étiquette quand les deux sont données
+    set:
+      image.empreinte: sha256:1111111111111111111111111111111111111111111111111111111111111111
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/entreprisetools/board/pilotage@sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+  - it: refuse de rendre sans image (jamais de latest implicite)
+    set:
+      image.tag: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "ni image.tag ni image.empreinte"
+
+  - it: tourne sans root, sans privilège, racine en lecture seule
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.securityContext.seccompProfile.type
+          value: RuntimeDefault
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.drop
+          content: ALL
+
+  - it: ne monte pas de jeton d'API et n'injecte pas les variables de Service
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.enableServiceLinks
+          value: false
+
+  - it: dit à l'application d'écouter sur toutes les interfaces du pod
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SERVER_ADDRESS
+            value: "0.0.0.0"
+
+  - it: remplace l'ancienne version seulement quand la nouvelle est prête
+    asserts:
+      - equal:
+          path: spec.strategy.rollingUpdate.maxUnavailable
+          value: 0
+
+  - it: passe en Recreate dès qu'il y a un volume ReadWriteOnce
+    set:
+      volumes:
+        - nom: etat
+          chemin: /var/lib/app
+          taille: 1Gi
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: relance les pods quand un secret change
+    set:
+      secrets.scelles.MOT_DE_PASSE: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq0000
+    asserts:
+      - exists:
+          path: spec.template.metadata.annotations["plateforme.entreprisetools/empreinte-secrets"]
+      - equal:
+          path: spec.template.spec.containers[0].envFrom[0].secretRef.name
+          value: pilotage-secrets
+
+  - it: calcule le seuil de la sonde de démarrage depuis delaiMax
+    set:
+      sondes.demarrage.delaiMax: 300
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].startupProbe.failureThreshold
+          value: 60

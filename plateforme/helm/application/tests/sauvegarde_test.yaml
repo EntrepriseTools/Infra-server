@@ -1,0 +1,71 @@
+suite: la sauvegarde relue avant déploiement
+templates:
+  - sauvegarde.yaml
+release:
+  name: pilotage
+  namespace: pilotage
+set:
+  image.tag: abc1234
+  ingress.hote: pilotage.example.org
+  secrets.scelles.DATABASE_USER: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq0000
+  secrets.scelles.DATABASE_PASSWORD: AgBy3i4OJSWK+PiTySYZZA9rO43cGDEq1111
+  sauvegardeAvantDeploiement.base: pilotage
+  sauvegardeAvantDeploiement.utilisateur.cle: DATABASE_USER
+  sauvegardeAvantDeploiement.motDePasse.cle: DATABASE_PASSWORD
+tests:
+  - it: est un hook PreSync d'Argo CD, après son volume
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: Job
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/hook"]
+          value: PreSync
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "0"
+
+  - it: garde le volume des prises quoi qu'il arrive
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: PersistentVolumeClaim
+      - equal:
+          path: metadata.annotations["helm.sh/resource-policy"]
+          value: keep
+      - equal:
+          path: metadata.annotations["argocd.argoproj.io/sync-wave"]
+          value: "-1"
+
+  - it: relit la prise (pg_restore --list) avant de la garder
+    documentIndex: 1
+    asserts:
+      - matchRegex:
+          path: spec.template.spec.containers[0].args[0]
+          pattern: "pg_restore --list"
+
+  - it: lit le mot de passe dans le Secret, jamais en clair
+    documentIndex: 1
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: pilotage-secrets
+                key: DATABASE_PASSWORD
+
+  - it: refuse de rendre sans nom de base
+    set:
+      sauvegardeAvantDeploiement.base: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "sauvegardeAvantDeploiement.base est obligatoire"
+
+  - it: disparaît quand elle est désactivée
+    set:
+      sauvegardeAvantDeploiement.actif: false
+    asserts:
+      - hasDocuments:
+          count: 0

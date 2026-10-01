@@ -1,0 +1,58 @@
+# =====================================================================
+# PROCUREMENT (dépôt Purchase_Management) — traduit de migration/procurement/app.conf.
+# MODE_WEB=spa : l'écran est un second Deployment, /api/ va au backend.
+# =====================================================================
+image:
+  depot: ghcr.io/entreprisetools/procurement/backend
+  tag: ""
+  empreinte: ""
+
+variablePort: PORT
+variableAdresse: SERVER_ADDRESS
+
+ressources:
+  requests:
+    cpu: 200m
+    memory: 768Mi
+  limits:
+    memory: 1Gi
+
+sondes:
+  chemin: /actuator/health
+  vivacite:
+    chemin: /actuator/health/liveness
+  preparation:
+    chemin: /actuator/health/readiness
+
+env:
+  SPRING_PROFILES_ACTIVE: prod
+  CORS_ALLOWED_ORIGINS: https://app.purchase.sbp.ma
+  SERVER_FORWARD_HEADERS_STRATEGY: framework
+  # BASE_VARIABLES d'infra (libpq) : l'hôte est le Service « postgres » de l'espace.
+  PGHOST: postgres
+  PGPORT: "5432"
+  PGDATABASE: procurement # À VÉRIFIER : PGDATABASE de /opt/procurement/.env
+
+secrets:
+  # À sceller : PGUSER, PGPASSWORD, JWT_SECRET (base64, 64 octets)
+  # (OLLAMA_CHAT_ENABLED reste false par défaut côté application)
+  scelles: {}
+
+frontend:
+  actif: true
+  image:
+    depot: ghcr.io/entreprisetools/procurement/frontend
+    tag: ""
+    empreinte: ""
+  prefixeApi: /api/
+
+ingress:
+  hote: app.purchase.sbp.ma
+  corpsMaxMio: 12
+
+sauvegardeAvantDeploiement:
+  base: procurement # = PGDATABASE ci-dessus
+  utilisateur:
+    cle: PGUSER
+  motDePasse:
+    cle: PGPASSWORD

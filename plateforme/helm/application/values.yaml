@@ -1,0 +1,173 @@
+# =====================================================================
+# Valeurs par DÉFAUT du chart « application ».
+#
+# Chaque application les surcharge dans gitops/applications/<app>/values.yaml.
+# Correspondance avec le manifeste d'infra (deploiement/app.conf) :
+#   IMAGE               → image.depot
+#   SONDES              → sondes.*
+#   VARIABLE_PORT       → variablePort
+#   VARIABLE_ADRESSE    → variableAdresse
+#   VOLUMES             → volumes
+#   MEMOIRE             → ressources.limits.memory
+#   CORPS_MAX           → ingress.corpsMaxMio
+#   MODE_WEB=spa        → frontend.actif + frontend.prefixeApi
+#   ACCES_LIMITE        → ingress.listeBlanche
+#   BASE_VARIABLES / SECRETS / VARIABLES_OBLIGATOIRES → secrets.scelles + env
+#   (sauvegarde relue avant chaque livraison) → sauvegardeAvantDeploiement
+#
+# Le schéma (values.schema.json) REFUSE toute clé inconnue : une faute de
+# frappe arrête le rendu au lieu d'être ignorée en silence.
+# =====================================================================
+
+# Nom des objets. Vide = le nom de la release (= le nom de l'application).
+nomComplet: ""
+
+image:
+  # Sans étiquette : elle est donnée par `tag` ou `empreinte`.
+  depot: ghcr.io/entreprisetools/exemple
+  # Le SHA du commit qui a produit l'image. Posé par la CI (promotion).
+  tag: ""
+  # sha256:… — si présent, PRIORITAIRE : l'image est tirée par son empreinte,
+  # immuable (une étiquette peut être déplacée, une empreinte non).
+  empreinte: ""
+  politiqueTirage: IfNotPresent
+
+repliques: 1
+
+# Le port où l'application écoute dans le conteneur, et les variables
+# d'environnement par lesquelles on le lui dit.
+port: 8080
+variablePort: SERVER_PORT
+# Dans un pod, il faut écouter sur 0.0.0.0 (et non 127.0.0.1 comme sur
+# l'hôte) : le trafic arrive par l'interface du pod. "" = ne pas la poser.
+variableAdresse: SERVER_ADDRESS
+
+# Variables NON secrètes.
+env: {}
+
+secrets:
+  # Nom d'un Secret déjà présent dans l'espace. Rare : préférer `scelles`.
+  existant: ""
+  # Variables SECRÈTES, chiffrées pour CE cluster (Sealed Secrets) :
+  #   CLE: AgB…   ← sortie de plateforme/outils/sceller.sh
+  # Elles deviennent le Secret <nom>-secrets, injecté en variables d'environnement.
+  scelles: {}
+
+jvm:
+  # -XX:MaxRAMPercentage : la part de la LIMITE mémoire du conteneur que la
+  # JVM s'autorise pour son tas. Le reste : métaspace, threads, tampons.
+  pourcentageRam: 70
+
+ressources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+sondes:
+  # Le chemin par défaut des trois sondes.
+  chemin: /actuator/health
+  # Démarrage : tant qu'elle n'a pas réussi, les deux autres attendent.
+  # Spring Boot peut être lent : on lui laisse `delaiMax` secondes.
+  demarrage:
+    chemin: ""
+    delaiMax: 180
+  # Vivacité : échoue → le conteneur est REDÉMARRÉ. Ne doit PAS dépendre de
+  # la base (une base lente ne doit pas faire redémarrer l'application).
+  vivacite:
+    chemin: ""
+  # Préparation : échoue → le pod est RETIRÉ du Service (plus de trafic),
+  # sans redémarrage. C'est ici qu'on vérifie la base.
+  preparation:
+    chemin: ""
+
+securite:
+  # Un UID NUMÉRIQUE : Kubernetes ne peut vérifier « runAsNonRoot » que sur
+  # un nombre (USER app dans le Dockerfile ne suffit pas).
+  utilisateur: 10001
+  groupe: 10001
+  # Racine du conteneur en lecture seule ; /tmp est un emptyDir.
+  racineEnLectureSeule: true
+
+# Volumes persistants (local-path : un répertoire du disque du serveur).
+#   - nom: etat
+#     chemin: /var/lib/paie
+#     taille: 5Gi
+volumes: []
+classeStockage: ""
+
+ingress:
+  actif: true
+  hote: ""
+  classe: traefik
+  tls:
+    # false en mode coexistence : TLS est terminé par le nginx de l'hôte.
+    actif: false
+    emetteur: letsencrypt
+  # Taille maximale d'une requête, en Mio (téléversements).
+  corpsMaxMio: 12
+  # Adresses permises (CIDR). Vide = tout le monde.
+  listeBlanche: []
+  # Combien de proxys DEVANT Traefik ajoutent l'adresse du client à
+  # X-Forwarded-For : 1 en coexistence (le nginx de l'hôte), 0 en direct.
+  # Sans cela, la liste blanche verrait l'adresse du nginx, pas celle du client.
+  proxysDevant: 1
+  # En-têtes de réponse ajoutés.
+  entetes: {}
+
+frontend:
+  # Mode « spa » : un second Deployment sert l'écran bâti (nginx sans
+  # privilège) ; l'Ingress envoie `prefixeApi` au backend, le reste à l'écran.
+  actif: false
+  image:
+    depot: ""
+    tag: ""
+    empreinte: ""
+    politiqueTirage: IfNotPresent
+  port: 8080
+  prefixeApi: /api/
+  ressources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+sauvegardeAvantDeploiement:
+  # Le principe n° 3 d'infra, gardé : « rien ne se touche sans une copie
+  # relue ». Avant CHAQUE synchronisation (hook PreSync d'Argo CD), un
+  # pg_dump de la base, RELU par pg_restore --list. S'il échoue, la
+  # nouvelle version n'est PAS déployée.
+  actif: true
+  # Le client doit être de version ≥ celle du serveur.
+  image: docker.io/library/postgres:17-alpine
+  base: ""
+  hote: postgres
+  port: 5432
+  # Le rôle : une valeur, ou une clé du Secret de l'application.
+  utilisateur:
+    valeur: ""
+    cle: ""
+  # Le mot de passe : TOUJOURS une clé du Secret.
+  motDePasse:
+    cle: ""
+  garder: 10
+  taille: 5Gi
+
+metriques:
+  # ServiceMonitor pour Prometheus (exige la supervision du socle).
+  serviceMonitor: false
+  chemin: /actuator/prometheus
+
+autoscaling:
+  actif: false
+  minimum: 1
+  maximum: 3
+  cpuCible: 80
+
+reseau:
+  # Sorties SUPPLÉMENTAIRES (le socle permet DNS et PostgreSQL, rien d'autre).
+  #   - cidr: 0.0.0.0/0
+  #     ports: [443]
+  sorties: []

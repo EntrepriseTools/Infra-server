@@ -1,0 +1,56 @@
+# =====================================================================
+# Pipeline d'une application livrée sur la plateforme Kubernetes.
+# Copier dans le dépôt de l'application, puis adapter les TESTS (à vous)
+# et les paramètres de `publier` (application, image, contexte…).
+#
+#   push sur main → tests → publier (image signée, promue dans gitops/)
+#                          → Argo CD déploie → sonde publique
+#   pull request  → tests seulement
+# =====================================================================
+name: pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pipeline-${{ github.ref }}
+  # Sur main : ne jamais interrompre une publication en cours.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # ── À VOUS : les vrais tests (gradle test, npm test…), avec une vraie base.
+      - name: tests
+        run: echo "remplacer par les tests de l'application"
+
+  publier:
+    needs: [tests]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: EntrepriseTools/Infra-server/.github/workflows/k8s-publier.yml@v1
+    with:
+      application: __APP__
+      image: __IMAGE__
+      contexte: .
+      # frontend-image: __APP__/frontend      # mode spa
+      # frontend-contexte: frontend
+      url-publique: ${{ vars.URL_PUBLIQUE }}
+    secrets:
+      GITOPS_APP_CLIENT_ID: ${{ secrets.GITOPS_APP_CLIENT_ID }}
+      GITOPS_APP_CLE: ${{ secrets.GITOPS_APP_CLE }}

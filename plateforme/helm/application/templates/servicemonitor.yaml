@@ -1,0 +1,16 @@
+{{- if .Values.metriques.serviceMonitor }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "application.nom" . }}
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "application.selecteur" (dict "racine" . "composant" "backend") | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.metriques.chemin }}
+      interval: 30s
+{{- end }}

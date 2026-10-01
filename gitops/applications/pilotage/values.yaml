@@ -1,0 +1,58 @@
+# =====================================================================
+# PILOTAGE (dépôt board) — traduit de migration/pilotage/app.conf.
+# La première application à migrer : la moins critique.
+# =====================================================================
+image:
+  depot: ghcr.io/entreprisetools/board/pilotage
+  # Posés par la CI de board (promotion). Vides tant qu'aucune image n'est publiée.
+  tag: ""
+  empreinte: ""
+
+variablePort: SERVER_PORT
+variableAdresse: SERVER_ADDRESS
+
+# MEMOIRE=1g
+ressources:
+  requests:
+    cpu: 200m
+    memory: 768Mi
+  limits:
+    memory: 1Gi
+
+# SONDES="/ /actuator/health" : `/` prouve Spring, /actuator/health passe à
+# 503 dès que la base se tait → c'est la sonde de PRÉPARATION. La vivacité
+# ne doit pas dépendre de la base.
+sondes:
+  chemin: /actuator/health
+  vivacite:
+    chemin: /actuator/health/liveness
+  preparation:
+    chemin: /actuator/health/readiness
+
+env:
+  # pilotage.sh refusait https + cookie non sécurisé : derrière le nginx de
+  # l'hôte (TLS), le cookie DOIT être sécurisé.
+  COOKIE_SECURISE: "true"
+  # Spring doit croire X-Forwarded-Proto (posé par nginx, transmis par Traefik).
+  SERVER_FORWARD_HEADERS_STRATEGY: framework
+  DATABASE_URL: jdbc:postgresql://postgres:5432/pilotage
+
+secrets:
+  # À sceller (plateforme/outils/sceller.sh pilotage …) puis coller ici :
+  #   DATABASE_USER, DATABASE_PASSWORD   ← /etc/infra/secrets/pilotage.env
+  #   AUTH_SECRET (≥ 32 car.), ADMIN_PASSWORD
+  scelles: {}
+
+ingress:
+  hote: pilotage.sbp.ma # À VÉRIFIER : PILOTAGE_URL_PUBLIQUE de /opt/board/.env
+  corpsMaxMio: 12
+
+sauvegardeAvantDeploiement:
+  base: pilotage
+  utilisateur:
+    cle: DATABASE_USER
+  motDePasse:
+    cle: DATABASE_PASSWORD
+
+metriques:
+  serviceMonitor: false # true si Spring expose /actuator/prometheus

@@ -1,0 +1,44 @@
+#!/usr/sbin/nft -f
+# =====================================================================
+# Garde-barrière de k3s — posé en /etc/infra/k3s-garde.nft, chargé par
+# l'unité k3s-garde.service.
+#
+# Pourquoi une table À NOUS et pas /etc/nftables.conf ?  Le fichier Debian
+# commence par `flush ruleset` : le recharger EFFACERAIT les règles que
+# Docker, k3s (kube-proxy, flannel, kube-router) écrivent eux-mêmes.
+# Ici on ne touche qu'à la table `inet k3s_garde`.
+#
+# Ce qu'elle fait : rien n'entre de L'EXTÉRIEUR sur les ports internes du
+# cluster et de la base. Le reste (22, 80, 443) n'est pas concerné.
+#   6443        API Kubernetes      → seulement par le tunnel SSH (127.0.0.1)
+#   10250       kubelet
+#   2379-2380   etcd
+#   8472/udp    VXLAN flannel
+#   30000-32767 NodePorts (on n'en utilise pas ; ceinture et bretelles)
+#   5432        PostgreSQL natif, ouvert aux pods (10.42.0.0/16) seulement
+# =====================================================================
+
+# Idempotent : crée la table si besoin, la supprime, la recrée vide.
+table inet k3s_garde
+delete table inet k3s_garde
+
+table inet k3s_garde {
+  set ports_internes_tcp {
+    type inet_service; flags interval
+    elements = { 2379-2380, 5432, 6443, 10250, 30000-32767 }
+  }
+
+  chain entree {
+    # Juste avant le filtre « normal » (priorité 0).
+    type filter hook input priority -10; policy accept;
+
+    iifname "lo" accept
+    # Le trafic des pods et des Services vers l'hôte (CoreDNS, kubelet,
+    # PostgreSQL) — CIDR par défaut de k3s.
+    ip saddr { 10.42.0.0/16, 10.43.0.0/16 } accept
+    ct state established,related accept
+
+    tcp dport @ports_internes_tcp counter drop
+    udp dport 8472 counter drop
+  }
+}

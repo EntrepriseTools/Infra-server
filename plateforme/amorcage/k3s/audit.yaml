@@ -1,0 +1,56 @@
+# =====================================================================
+# Politique d'audit de l'API Kubernetes.
+#
+# Règle d'or : la PREMIÈRE règle qui correspond s'applique. On va donc du
+# plus précis au plus général.
+#   None             rien
+#   Metadata         qui, quoi, quand — sans le contenu
+#   Request          + le corps de la requête
+#   RequestResponse  + la réponse
+#
+# Lire le journal :  sudo jq -c 'select(.verb=="delete")' /var/log/k3s/audit.log
+# =====================================================================
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages: ["RequestReceived"]
+rules:
+  # Le bruit : sondes de santé, lectures du plan de contrôle sur lui-même.
+  - level: None
+    nonResourceURLs: ["/healthz*", "/livez*", "/readyz*", "/version", "/metrics"]
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get", "list", "watch"]
+  - level: None
+    resources:
+      - group: "coordination.k8s.io"
+        resources: ["leases"]
+    verbs: ["get", "update", "watch", "list"]
+  - level: None
+    resources:
+      - group: ""
+        resources: ["events"]
+
+  # Les Secrets (et le state Terraform, qui EST un Secret) : on note qui les
+  # touche, JAMAIS leur contenu — sinon le journal devient une fuite.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps", "serviceaccounts/token"]
+      - group: "bitnami.com"
+        resources: ["sealedsecrets"]
+
+  # exec / attach / port-forward : qui est entré dans un conteneur.
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"]
+
+  # Toute ÉCRITURE ailleurs : le corps de la requête (ce qui a été demandé).
+  - level: Request
+    verbs: ["create", "update", "patch", "delete", "deletecollection"]
+
+  # Les lectures restantes : métadonnées seulement.
+  - level: Metadata

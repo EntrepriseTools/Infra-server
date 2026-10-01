@@ -1,0 +1,23 @@
+# =====================================================================
+# Exceptions trivy — CHACUNE limitée à un fichier et JUSTIFIÉE.
+# Une exception sans raison écrite est refusée en revue.
+# =====================================================================
+misconfigurations:
+  - id: KSV-0041
+    paths:
+      - "amorcage/rbac-pipeline.yaml"
+    statement: >-
+      terraform-plan-secrets est un ClusterRole (pour être réutilisable),
+      mais il n'est JAMAIS lié par un ClusterRoleBinding : seulement par des
+      RoleBindings, espace par espace (terraform-etat ici, les espaces du
+      socle dans espaces.tf). La lecture des Secrets n'est donc pas
+      « cluster-wide ». Voir docs/plateforme/07-devsecops.md.
+
+  - id: KSV-0046
+    paths:
+      - "amorcage/rbac-pipeline.yaml"
+    statement: >-
+      terraform-plan-lecture donne « * » sur des groupes d'API NOMMÉS, avec
+      les verbes get/list/watch SEULEMENT (aucune écriture), et sans le
+      groupe "" pour les secrets. C'est la lecture dont `terraform plan` a
+      besoin pour comparer le code à l'état réel.

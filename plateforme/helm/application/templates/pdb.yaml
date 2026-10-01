@@ -1,0 +1,16 @@
+{{- /* Un PodDisruptionBudget n'a de sens qu'à partir de deux pods : il
+       empêche une opération VOLONTAIRE (drain du nœud, mise à jour) de les
+       arrêter tous à la fois. Avec un seul pod, il bloquerait le drain. */ -}}
+{{- if or (gt (int .Values.repliques) 1) (and .Values.autoscaling.actif (gt (int .Values.autoscaling.minimum) 1)) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "application.nom" . }}
+  labels:
+    {{- include "application.etiquettes" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "application.selecteur" (dict "racine" . "composant" "backend") | nindent 6 }}
+{{- end }}

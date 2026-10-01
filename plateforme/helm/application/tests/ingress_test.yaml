@@ -1,0 +1,86 @@
+suite: l'Ingress et ses middlewares
+templates:
+  - ingress.yaml
+  - middlewares.yaml
+release:
+  name: procurement
+  namespace: procurement
+set:
+  image.tag: abc1234
+  ingress.hote: procurement.example.org
+tests:
+  - it: exige un nom d'hôte
+    template: ingress.yaml
+    set:
+      ingress.hote: ""
+    asserts:
+      - failedTemplate:
+          errorPattern: "ingress.hote est obligatoire"
+
+  - it: entre par « web » sans TLS (coexistence)
+    template: ingress.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["traefik.ingress.kubernetes.io/router.entrypoints"]
+          value: web
+      - notExists:
+          path: spec.tls
+
+  - it: demande un certificat à cert-manager avec TLS (direct)
+    template: ingress.yaml
+    set:
+      ingress.tls.actif: true
+    asserts:
+      - equal:
+          path: metadata.annotations["cert-manager.io/cluster-issuer"]
+          value: letsencrypt
+      - equal:
+          path: spec.tls[0].secretName
+          value: procurement-tls
+
+  - it: envoie l'API au backend et le reste à l'écran en mode spa
+    template: ingress.yaml
+    set:
+      frontend.actif: true
+      frontend.image.depot: ghcr.io/entreprisetools/procurement/frontend
+      frontend.image.tag: abc1234
+    asserts:
+      - equal:
+          path: spec.rules[0].http.paths[0].path
+          value: /api/
+      - equal:
+          path: spec.rules[0].http.paths[0].backend.service.name
+          value: procurement
+      - equal:
+          path: spec.rules[0].http.paths[1].backend.service.name
+          value: procurement-frontend
+
+  - it: place la liste blanche EN PREMIER parmi les middlewares
+    template: ingress.yaml
+    set:
+      ingress.listeBlanche: ["203.0.113.0/24"]
+    asserts:
+      - matchRegex:
+          path: metadata.annotations["traefik.ingress.kubernetes.io/router.middlewares"]
+          pattern: "^procurement-procurement-liste-blanche@kubernetescrd,"
+
+  - it: convertit corpsMaxMio en octets
+    template: middlewares.yaml
+    documentIndex: 0
+    set:
+      ingress.corpsMaxMio: 32
+    asserts:
+      - equal:
+          path: spec.buffering.maxRequestBodyBytes
+          value: 33554432
+
+  - it: annonce l'application et sa version (sondée par la CI)
+    template: middlewares.yaml
+    documentIndex: 1
+    asserts:
+      - equal:
+          path: spec.headers.customResponseHeaders.X-Infra-App
+          value: procurement
+      - equal:
+          path: spec.headers.customResponseHeaders.X-Infra-Version
+          value: abc1234

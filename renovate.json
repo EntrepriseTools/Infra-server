@@ -1,0 +1,63 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Mises à jour des dépendances de la plateforme : providers et charts Terraform, actions GitHub (par SHA), k3s, Sealed Secrets. Chaque mise à jour = une PR, qui passe la CI et le plan Terraform.",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", ":semanticCommitTypeAll(chore)"],
+  "timezone": "Africa/Casablanca",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dépendances"],
+  "prConcurrentLimit": 5,
+  "packageRules": [
+    {
+      "description": "Les charts du socle (helm_release dans Terraform) : une PR groupée par semaine.",
+      "matchManagers": ["terraform"],
+      "matchDepTypes": ["helm_release"],
+      "groupName": "charts du socle"
+    },
+    {
+      "description": "Une version MAJEURE demande une lecture des notes de version : approbation manuelle dans le tableau de bord.",
+      "matchUpdateTypes": ["major"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "k3s : patchs seulement automatiquement ; une nouvelle mineure de Kubernetes se décide.",
+      "matchPackageNames": ["k3s-io/k3s", "rancher/k3s"],
+      "matchUpdateTypes": ["minor", "major"],
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Sealed Secrets (Application Argo CD rendue par le chart socle).",
+      "managerFilePatterns": ["/^plateforme/helm/socle/values\\.yaml$/"],
+      "matchStrings": ["sealedSecrets:\\s*\\n(?:\\s*#.*\\n)*\\s*version:\\s*(?<currentValue>\\S+)"],
+      "datasourceTemplate": "helm",
+      "depNameTemplate": "sealed-secrets",
+      "registryUrlTemplate": "https://bitnami-labs.github.io/sealed-secrets"
+    },
+    {
+      "customType": "regex",
+      "description": "Version de k3s posée par le script d'amorçage.",
+      "managerFilePatterns": ["/^plateforme/amorcage/installer-k3s\\.sh$/"],
+      "matchStrings": ["K3S_VERSION:-(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+)"],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "k3s-io/k3s"
+    },
+    {
+      "customType": "regex",
+      "description": "Image k3s du labo.",
+      "managerFilePatterns": ["/^plateforme/labo/labo\\.sh$/"],
+      "matchStrings": ["(?<depName>rancher/k3s):(?<currentValue>v[0-9]+\\.[0-9]+\\.[0-9]+-k3s[0-9]+)"],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "Version de Terraform dans les workflows.",
+      "managerFilePatterns": ["/^\\.github/workflows/plateforme-.+\\.yml$/"],
+      "matchStrings": ["TERRAFORM_VERSION: \"(?<currentValue>[0-9.]+)\""],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "hashicorp/terraform",
+      "extractVersionTemplate": "^v(?<version>.*)$"
+    }
+  ]
+}

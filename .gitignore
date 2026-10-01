@@ -1,2 +1,10 @@
 *.tmp
 /tmp/
+# Terraform : le cache local et tout ce qui pourrait contenir un state.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+# Helm : dépendances téléchargées
+plateforme/helm/*/charts/

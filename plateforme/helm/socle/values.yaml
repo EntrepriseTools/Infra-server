@@ -1,0 +1,29 @@
+# Toutes ces valeurs sont POSÉES PAR TERRAFORM (socle.tf) : ne pas les
+# modifier ici, mais dans terraform.tfvars.
+
+modeIngress: coexistence
+courrielAcme: ""
+
+gitops:
+  depot: git@github.com:EntrepriseTools/Infra-server.git
+  revision: main
+  # Où vivent les valeurs par application, et le chart commun.
+  dossierApplications: gitops/applications
+  chartApplication: plateforme/helm/application
+
+applications: []
+
+kyverno:
+  action: Audit
+  registresAutorises:
+    - ghcr.io/entreprisetools/*
+  identiteSignature: "^https://github\\.com/EntrepriseTools/Infra-server/\\.github/workflows/k8s-publier\\.yml@refs/(heads/main|tags/v[0-9]+(\\.[0-9]+)*)$"
+  # Ce que l'on vérifie par signature : les images de l'organisation.
+  imagesSignees:
+    - ghcr.io/entreprisetools/*
+
+sealedSecrets:
+  # Suivi par Renovate (gestionnaire « argocd »).
+  version: 2.20.0
+
+observabilite: true

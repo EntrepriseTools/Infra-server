@@ -1,0 +1,261 @@
+# =====================================================================
+# Terraform contre le VRAI cluster.
+#
+#   PR       → plan  (compte terraform-plan : LECTURE seule), publié en
+#              commentaire sur la PR. Rien n'est modifié.
+#   main     → plan + apply (compte terraform-apply : cluster-admin), dans
+#              l'environnement GitHub « production » : un relecteur doit
+#              APPROUVER le déploiement dans l'interface avant qu'il parte.
+#
+# Pourquoi deux comptes ?  `terraform plan` exécute du code de la PR (les
+# providers, les data sources). Une PR piégée ne doit rien pouvoir changer :
+# avec terraform-plan, elle ne peut que lire, et pas les secrets des
+# applications ni la clé de Sealed Secrets (amorcage/rbac-pipeline.yaml).
+#
+# Secrets attendus :
+#   dépôt          PLATEFORME_SSH_HOST, PLATEFORME_SSH_USER,
+#                  PLATEFORME_SSH_KEY, PLATEFORME_SSH_KNOWN_HOSTS,
+#                  ARGOCD_CLE_DEPOT, ARGOCD_ADMIN_BCRYPT
+#   env. plateforme-plan   PLATEFORME_KUBECONFIG_PLAN
+#   env. production        PLATEFORME_KUBECONFIG_APPLY  (+ relecteurs obligatoires)
+# =====================================================================
+name: plateforme · terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "plateforme/terraform/**"
+      - "plateforme/helm/socle/**"
+      - ".github/workflows/plateforme-terraform.yml"
+      - ".github/actions/tunnel-plateforme/**"
+  push:
+    branches: [main]
+    paths:
+      - "plateforme/terraform/**"
+      - "plateforme/helm/socle/**"
+      - ".github/workflows/plateforme-terraform.yml"
+      - ".github/actions/tunnel-plateforme/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Un seul passage à la fois contre le cluster, et on n'en coupe JAMAIS un
+# (un apply interrompu laisse un verrou et un état à moitié écrit).
+concurrency:
+  group: plateforme-terraform
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: "1.16.4"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  REPERTOIRE: plateforme/terraform/plateforme
+
+jobs:
+  plan:
+    name: plan (lecture seule)
+    # Pas de secrets pour une PR venue d'un fork.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: plateforme-plan
+    permissions:
+      contents: read
+      pull-requests: write # le commentaire du plan
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: préalable — la plateforme est-elle raccordée ?
+        id: prealable
+        env:
+          MODE: plan
+          PLATEFORME_SSH_HOST: ${{ secrets.PLATEFORME_SSH_HOST }}
+          PLATEFORME_SSH_USER: ${{ secrets.PLATEFORME_SSH_USER }}
+          PLATEFORME_SSH_KEY: ${{ secrets.PLATEFORME_SSH_KEY }}
+          PLATEFORME_SSH_KNOWN_HOSTS: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          PLATEFORME_KUBECONFIG_PLAN: ${{ secrets.PLATEFORME_KUBECONFIG_PLAN }}
+          ARGOCD_CLE_DEPOT: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          ARGOCD_ADMIN_BCRYPT: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          manque=""
+          for v in PLATEFORME_SSH_HOST PLATEFORME_SSH_USER PLATEFORME_SSH_KEY PLATEFORME_SSH_KNOWN_HOSTS \
+                   PLATEFORME_KUBECONFIG_PLAN ARGOCD_CLE_DEPOT ARGOCD_ADMIN_BCRYPT; do
+            [ -n "${!v}" ] || manque="$manque $v"
+          done
+          if [ -z "$manque" ]; then
+            echo "pret=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pret=false" >> "$GITHUB_OUTPUT"
+          msg="Secrets absents :$manque — mise en route : docs/plateforme/06-ci-cd-github-actions.md §2."
+          {
+            echo "## Plan Terraform : non lancé"
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = plan ]; then
+            # Tant que le serveur n'est pas raccordé, une PR n'a rien à
+            # comparer : on le DIT, sans rougir toutes les PR.
+            echo "::warning title=Plateforme non raccordée::$msg"
+          else
+            # Sur main, un apply qui ne peut pas tourner est une ERREUR.
+            echo "::error title=Plateforme non raccordée::$msg"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/tunnel-plateforme
+        if: steps.prealable.outputs.pret == 'true'
+        with:
+          hote: ${{ secrets.PLATEFORME_SSH_HOST }}
+          utilisateur: ${{ secrets.PLATEFORME_SSH_USER }}
+          cle: ${{ secrets.PLATEFORME_SSH_KEY }}
+          hotes-connus: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          kubeconfig: ${{ secrets.PLATEFORME_KUBECONFIG_PLAN }}
+
+      - name: init
+        if: steps.prealable.outputs.pret == 'true'
+        working-directory: ${{ env.REPERTOIRE }}
+        run: terraform init
+
+      - name: plan
+        id: plan
+        if: steps.prealable.outputs.pret == 'true'
+        working-directory: ${{ env.REPERTOIRE }}
+        env:
+          TF_VAR_argocd_cle_depot: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          TF_VAR_argocd_admin_bcrypt: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          # -lock=false : terraform-plan ne peut pas écrire le verrou (Lease),
+          # et un plan ne modifie rien. -detailed-exitcode : 0 = rien à
+          # faire, 2 = des changements, 1 = erreur.
+          set +e
+          terraform plan -lock=false -no-color -detailed-exitcode -out=tfplan > plan-brut.txt 2>&1
+          code=$?
+          set -e
+          cat plan-brut.txt
+          [ "$code" = 1 ] && exit 1
+          terraform show -no-color tfplan > plan.txt
+          echo "changements=$([ "$code" = 2 ] && echo oui || echo non)" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Plan Terraform"
+            echo '```'
+            grep -E '^(Plan:|No changes)' plan-brut.txt || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: commenter la PR
+        if: steps.prealable.outputs.pret == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          REPERTOIRE: ${{ env.REPERTOIRE }}
+          CHANGEMENTS: ${{ steps.plan.outputs.changements }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marque = '<!-- plateforme-terraform-plan -->';
+            let plan = fs.readFileSync(`${process.env.REPERTOIRE}/plan.txt`, 'utf8');
+            const max = 60000;
+            if (plan.length > max) plan = plan.slice(0, max) + '\n… (tronqué : voir le journal du travail)';
+            const titre = process.env.CHANGEMENTS === 'oui' ? '🟡 des changements' : '🟢 aucun changement';
+            const corps = `${marque}\n### Plan Terraform — ${titre}\n\n<details><summary>Détail</summary>\n\n\`\`\`hcl\n${plan}\n\`\`\`\n</details>\n\n_Commit ${context.sha.slice(0, 7)} · compte terraform-plan (lecture seule)._`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const existants = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const ancien = existants.find(c => c.body && c.body.includes(marque));
+            if (ancien) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: ancien.id, body: corps });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: corps });
+            }
+
+  apply:
+    name: apply (production)
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Les règles de protection de l'environnement (relecteurs obligatoires)
+    # suspendent le travail ICI jusqu'à l'approbation.
+    environment: production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: préalable — la plateforme est-elle raccordée ?
+        id: prealable
+        env:
+          MODE: apply
+          PLATEFORME_SSH_HOST: ${{ secrets.PLATEFORME_SSH_HOST }}
+          PLATEFORME_SSH_USER: ${{ secrets.PLATEFORME_SSH_USER }}
+          PLATEFORME_SSH_KEY: ${{ secrets.PLATEFORME_SSH_KEY }}
+          PLATEFORME_SSH_KNOWN_HOSTS: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          PLATEFORME_KUBECONFIG_APPLY: ${{ secrets.PLATEFORME_KUBECONFIG_APPLY }}
+          ARGOCD_CLE_DEPOT: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          ARGOCD_ADMIN_BCRYPT: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          manque=""
+          for v in PLATEFORME_SSH_HOST PLATEFORME_SSH_USER PLATEFORME_SSH_KEY PLATEFORME_SSH_KNOWN_HOSTS \
+                   PLATEFORME_KUBECONFIG_APPLY ARGOCD_CLE_DEPOT ARGOCD_ADMIN_BCRYPT; do
+            [ -n "${!v}" ] || manque="$manque $v"
+          done
+          if [ -z "$manque" ]; then
+            echo "pret=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pret=false" >> "$GITHUB_OUTPUT"
+          msg="Secrets absents :$manque — mise en route : docs/plateforme/06-ci-cd-github-actions.md §2."
+          {
+            echo "## Plan Terraform : non lancé"
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = plan ]; then
+            # Tant que le serveur n'est pas raccordé, une PR n'a rien à
+            # comparer : on le DIT, sans rougir toutes les PR.
+            echo "::warning title=Plateforme non raccordée::$msg"
+          else
+            # Sur main, un apply qui ne peut pas tourner est une ERREUR.
+            echo "::error title=Plateforme non raccordée::$msg"
+            exit 1
+          fi
+
+      - uses: ./.github/actions/tunnel-plateforme
+        with:
+          hote: ${{ secrets.PLATEFORME_SSH_HOST }}
+          utilisateur: ${{ secrets.PLATEFORME_SSH_USER }}
+          cle: ${{ secrets.PLATEFORME_SSH_KEY }}
+          hotes-connus: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          kubeconfig: ${{ secrets.PLATEFORME_KUBECONFIG_APPLY }}
+
+      - name: init
+        working-directory: ${{ env.REPERTOIRE }}
+        run: terraform init
+
+      - name: plan puis apply DU MÊME plan
+        working-directory: ${{ env.REPERTOIRE }}
+        env:
+          TF_VAR_argocd_cle_depot: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          TF_VAR_argocd_admin_bcrypt: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          # Appliquer le fichier de plan garantit qu'on applique EXACTEMENT
+          # ce qui a été affiché — pas un nouveau calcul.
+          terraform plan -no-color -out=tfplan
+          terraform apply -no-color -auto-approve tfplan
+          {
+            echo "## Apply Terraform — $(date -u +%FT%TZ)"
+            echo '```'
+            terraform output -no-color
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

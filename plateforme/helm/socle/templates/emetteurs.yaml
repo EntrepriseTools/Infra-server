@@ -1,0 +1,33 @@
+{{- /* Les émetteurs de certificats (cert-manager).
+       - letsencrypt-staging : pour ESSAYER (limites généreuses, certificat
+         non reconnu par les navigateurs). Toujours commencer par lui.
+       - letsencrypt         : le vrai. Limite : 5 certificats identiques / semaine.
+       - auto-signe          : pour le labo et les essais internes.
+       Défi HTTP-01 : Let's Encrypt appelle http://<nom>/.well-known/acme-challenge/…
+       qui doit arriver jusqu'à Traefik → fonctionne en mode DIRECT seulement. */ -}}
+{{- if .Values.courrielAcme }}
+{{- range $nom, $serveur := dict "letsencrypt" "https://acme-v02.api.letsencrypt.org/directory" "letsencrypt-staging" "https://acme-staging-v02.api.letsencrypt.org/directory" }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ $nom }}
+spec:
+  acme:
+    server: {{ $serveur }}
+    email: {{ $.Values.courrielAcme | quote }}
+    privateKeySecretRef:
+      name: {{ $nom }}-compte
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: traefik
+{{- end }}
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: auto-signe
+spec:
+  selfSigned: {}

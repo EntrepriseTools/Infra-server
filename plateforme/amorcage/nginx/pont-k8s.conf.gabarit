@@ -1,0 +1,51 @@
+# =====================================================================
+# Posé par plateforme/amorcage/brancher-nginx.sh — NE PAS ÉDITER À LA MAIN.
+#
+# Mode « coexistence » : le nginx de l'hôte garde 80/443 pour TOUT le
+# monde (les applications encore livrées par `infra`, et celles qui sont
+# passées dans Kubernetes). Pour __NOM__, il termine TLS (certificat
+# certbot, comme aujourd'hui) et passe la main à Traefik, à l'adresse FIXE
+# de son Service : __TRAEFIK__ (joignable depuis l'hôte seulement).
+#
+# Le jour où toutes les applications sont dans Kubernetes : mode « direct »
+# (Traefik prend 80/443 lui-même, cert-manager les certificats) et ce
+# fichier disparaît. Voir docs/plateforme/09-migration.md.
+# =====================================================================
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __NOM__;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name __NOM__;
+
+    ssl_certificate     /etc/letsencrypt/live/__NOM__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__NOM__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Plafond large ici : la limite PAR APPLICATION est tenue par Traefik
+    # (middleware « corps », valeur `ingress.corpsMax` du chart).
+    client_max_body_size 64m;
+
+    # Pour qu'on sache, depuis Internet, QUI a répondu (comme X-Infra-App).
+    add_header X-Infra-Voie "k8s" always;
+
+    location / {
+        proxy_pass http://__TRAEFIK__;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header Connection        "";
+        # SSE et réponses longues (tableau de bord IA de procurement).
+        proxy_buffering    off;
+        proxy_read_timeout 300s;
+    }
+}

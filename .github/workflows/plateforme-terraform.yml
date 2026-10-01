@@ -74,7 +74,45 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
 
+      - name: préalable — la plateforme est-elle raccordée ?
+        id: prealable
+        env:
+          MODE: plan
+          PLATEFORME_SSH_HOST: ${{ secrets.PLATEFORME_SSH_HOST }}
+          PLATEFORME_SSH_USER: ${{ secrets.PLATEFORME_SSH_USER }}
+          PLATEFORME_SSH_KEY: ${{ secrets.PLATEFORME_SSH_KEY }}
+          PLATEFORME_SSH_KNOWN_HOSTS: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          PLATEFORME_KUBECONFIG_PLAN: ${{ secrets.PLATEFORME_KUBECONFIG_PLAN }}
+          ARGOCD_CLE_DEPOT: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          ARGOCD_ADMIN_BCRYPT: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          manque=""
+          for v in PLATEFORME_SSH_HOST PLATEFORME_SSH_USER PLATEFORME_SSH_KEY PLATEFORME_SSH_KNOWN_HOSTS \
+                   PLATEFORME_KUBECONFIG_PLAN ARGOCD_CLE_DEPOT ARGOCD_ADMIN_BCRYPT; do
+            [ -n "${!v}" ] || manque="$manque $v"
+          done
+          if [ -z "$manque" ]; then
+            echo "pret=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pret=false" >> "$GITHUB_OUTPUT"
+          msg="Secrets absents :$manque — mise en route : docs/plateforme/06-ci-cd-github-actions.md §2."
+          {
+            echo "## Plan Terraform : non lancé"
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = plan ]; then
+            # Tant que le serveur n'est pas raccordé, une PR n'a rien à
+            # comparer : on le DIT, sans rougir toutes les PR.
+            echo "::warning title=Plateforme non raccordée::$msg"
+          else
+            # Sur main, un apply qui ne peut pas tourner est une ERREUR.
+            echo "::error title=Plateforme non raccordée::$msg"
+            exit 1
+          fi
+
       - uses: ./.github/actions/tunnel-plateforme
+        if: steps.prealable.outputs.pret == 'true'
         with:
           hote: ${{ secrets.PLATEFORME_SSH_HOST }}
           utilisateur: ${{ secrets.PLATEFORME_SSH_USER }}
@@ -83,11 +121,13 @@ jobs:
           kubeconfig: ${{ secrets.PLATEFORME_KUBECONFIG_PLAN }}
 
       - name: init
+        if: steps.prealable.outputs.pret == 'true'
         working-directory: ${{ env.REPERTOIRE }}
         run: terraform init
 
       - name: plan
         id: plan
+        if: steps.prealable.outputs.pret == 'true'
         working-directory: ${{ env.REPERTOIRE }}
         env:
           TF_VAR_argocd_cle_depot: ${{ secrets.ARGOCD_CLE_DEPOT }}
@@ -112,6 +152,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: commenter la PR
+        if: steps.prealable.outputs.pret == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           REPERTOIRE: ${{ env.REPERTOIRE }}
@@ -152,6 +193,43 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
+
+      - name: préalable — la plateforme est-elle raccordée ?
+        id: prealable
+        env:
+          MODE: apply
+          PLATEFORME_SSH_HOST: ${{ secrets.PLATEFORME_SSH_HOST }}
+          PLATEFORME_SSH_USER: ${{ secrets.PLATEFORME_SSH_USER }}
+          PLATEFORME_SSH_KEY: ${{ secrets.PLATEFORME_SSH_KEY }}
+          PLATEFORME_SSH_KNOWN_HOSTS: ${{ secrets.PLATEFORME_SSH_KNOWN_HOSTS }}
+          PLATEFORME_KUBECONFIG_APPLY: ${{ secrets.PLATEFORME_KUBECONFIG_APPLY }}
+          ARGOCD_CLE_DEPOT: ${{ secrets.ARGOCD_CLE_DEPOT }}
+          ARGOCD_ADMIN_BCRYPT: ${{ secrets.ARGOCD_ADMIN_BCRYPT }}
+        run: |
+          manque=""
+          for v in PLATEFORME_SSH_HOST PLATEFORME_SSH_USER PLATEFORME_SSH_KEY PLATEFORME_SSH_KNOWN_HOSTS \
+                   PLATEFORME_KUBECONFIG_APPLY ARGOCD_CLE_DEPOT ARGOCD_ADMIN_BCRYPT; do
+            [ -n "${!v}" ] || manque="$manque $v"
+          done
+          if [ -z "$manque" ]; then
+            echo "pret=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "pret=false" >> "$GITHUB_OUTPUT"
+          msg="Secrets absents :$manque — mise en route : docs/plateforme/06-ci-cd-github-actions.md §2."
+          {
+            echo "## Plan Terraform : non lancé"
+            echo "$msg"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = plan ]; then
+            # Tant que le serveur n'est pas raccordé, une PR n'a rien à
+            # comparer : on le DIT, sans rougir toutes les PR.
+            echo "::warning title=Plateforme non raccordée::$msg"
+          else
+            # Sur main, un apply qui ne peut pas tourner est une ERREUR.
+            echo "::error title=Plateforme non raccordée::$msg"
+            exit 1
+          fi
 
       - uses: ./.github/actions/tunnel-plateforme
         with:

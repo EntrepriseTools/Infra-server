@@ -129,6 +129,7 @@ jobs:
           COMPTE: ${{ secrets.INFRA_SSH_USER }}
           CLE: ${{ secrets.INFRA_SSH_KEY }}
           CONNUS: ${{ secrets.INFRA_SSH_KNOWN_HOSTS }}
+          APPLICATION: ${{ inputs.application }}
         run: |
           manque=""
           [ -n "$HOTE" ]   || manque="$manque INFRA_SSH_HOST"
@@ -136,36 +137,37 @@ jobs:
           [ -n "$CLE" ]    || manque="$manque INFRA_SSH_KEY"
           [ -n "$CONNUS" ] || manque="$manque INFRA_SSH_KNOWN_HOSTS"
           if [ -n "$manque" ]; then
-            echo "::error title=Secrets absents::Il manque :$manque. Sur le serveur, « sudo infra cle ${{ inputs.application }} » les affiche. Rien n'a été touché."
+            echo "::error title=Secrets absents::Il manque :$manque. Sur le serveur, « sudo infra cle $APPLICATION » les affiche. Rien n'a été touché."
             exit 1
           fi
           case "$COMPTE" in root) echo "::error::INFRA_SSH_USER vaut root : chaque application a son compte."; exit 1 ;; esac
 
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Le manifeste est celui de « ${{ inputs.application }} »
         id: manifeste
         env:
           MANIFESTE: ${{ inputs.manifeste }}
           APPLICATION: ${{ inputs.application }}
+          FRONTEND: ${{ inputs.frontend }}
         run: |
           [ -f "$MANIFESTE" ] || { echo "::error::$MANIFESTE absent (voir Infra-server, modeles/depot)."; exit 1; }
           lire() { sed -n "s/^[[:space:]]*$1[[:space:]]*=//p" "$MANIFESTE" | head -1 | tr -d '"'"'"'\r'; }
           app="$(lire APP)"; image="$(lire IMAGE)"; mode="$(lire MODE_WEB)"
           [ "$app" = "$APPLICATION" ] || { echo "::error::$MANIFESTE dit APP=$app, le workflow livre « $APPLICATION »."; exit 1; }
           [[ "$image" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]] || { echo "::error::IMAGE illisible dans $MANIFESTE : « $image »."; exit 1; }
-          if [ "${mode:-proxy}" = spa ] && [ -z "${{ inputs.frontend }}" ]; then
+          if [ "${mode:-proxy}" = spa ] && [ -z "$FRONTEND" ]; then
             echo "::error::MODE_WEB=spa mais l'entrée « frontend » est vide : l'écran ne serait pas livré."; exit 1
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "✓ $APPLICATION — image $image:${GITHUB_SHA::8}, mode ${mode:-proxy}"
 
-      - uses: docker/setup-buildx-action@v3
-
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
       # Pas d'artefact d'enregistrement de construction : le quota d'artefacts
       # est celui du COMPTE, partagé ; il a déjà fait tomber la paie.
       - name: L'image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         env:
           DOCKER_BUILD_RECORD_UPLOAD: false
         with:
@@ -177,7 +179,7 @@ jobs:
           cache-from: type=gha,scope=${{ inputs.application }}
           cache-to: type=gha,mode=max,scope=${{ inputs.application }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         if: inputs.frontend != ''
         with:
           node-version: ${{ inputs.frontend-node }}
@@ -190,6 +192,8 @@ jobs:
         env:
           VARIABLES: ${{ inputs.frontend-env }}
           COMMANDE: ${{ inputs.frontend-commande }}
+          FRONTEND: ${{ inputs.frontend }}
+          SORTIE: ${{ inputs.frontend-sortie }}
         run: |
           while IFS= read -r kv; do
             [ -n "$kv" ] || continue
@@ -197,15 +201,19 @@ jobs:
             export "${kv?}"
           done <<< "$VARIABLES"
           bash -euo pipefail -c "$COMMANDE"
-          [ -f "${{ inputs.frontend-sortie }}/index.html" ] || { echo "::error::pas d'index.html dans ${{ inputs.frontend }}/${{ inputs.frontend-sortie }}"; exit 1; }
+          [ -f "$SORTIE/index.html" ] || { echo "::error::pas d'index.html dans $FRONTEND/$SORTIE"; exit 1; }
 
       - name: La livraison
+        env:
+          MANIFESTE: ${{ inputs.manifeste }}
+          FRONTEND: ${{ inputs.frontend }}
+          SORTIE: ${{ inputs.frontend-sortie }}
         run: |
           d="$RUNNER_TEMP/livraison"; mkdir -p "$d"
-          cp "${{ inputs.manifeste }}" "$d/app.conf"
+          cp "$MANIFESTE" "$d/app.conf"
           gzip -1 -c "$RUNNER_TEMP/image.tar" > "$d/image.tar.gz"
-          if [ -n "${{ inputs.frontend }}" ]; then
-            tar -czf "$d/frontend.tar.gz" -C "${{ inputs.frontend }}/${{ inputs.frontend-sortie }}" .
+          if [ -n "$FRONTEND" ]; then
+            tar -czf "$d/frontend.tar.gz" -C "$FRONTEND/$SORTIE" .
           fi
           tar -cf "$RUNNER_TEMP/livraison.tar" -C "$d" .
           ls -lh "$d" "$RUNNER_TEMP/livraison.tar"
@@ -248,10 +256,14 @@ jobs:
 
       - name: Résumé
         if: always()
+        env:
+          APPLICATION: ${{ inputs.application }}
+          IMAGE: ${{ steps.manifeste.outputs.image }}
+          STATUT: ${{ job.status }}
         run: |
           {
-            echo "### ${{ inputs.application }} — ${GITHUB_SHA::8}"
-            echo "Image \`${{ steps.manifeste.outputs.image }}:${GITHUB_SHA}\` · statut : **${{ job.status }}**"
+            echo "### $APPLICATION — ${GITHUB_SHA::8}"
+            echo "Image \`$IMAGE:${GITHUB_SHA}\` · statut : **$STATUT**"
             echo
-            echo "Sur le serveur : \`sudo infra etat ${{ inputs.application }}\` · \`sudo infra historique ${{ inputs.application }}\`"
+            echo "Sur le serveur : \`sudo infra etat $APPLICATION\` · \`sudo infra historique $APPLICATION\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -39,6 +39,10 @@ runs:
         KUBECONFIG_CONTENU: ${{ inputs.kubeconfig }}
       run: |
         set -euo pipefail
+        # Une entrée vide donne sinon un « usage: ssh … » illisible.
+        for v in HOTE UTILISATEUR CLE HOTES_CONNUS KUBECONFIG_CONTENU; do
+          [ -n "${!v}" ] || { echo "::error title=tunnel plateforme::entrée vide : $v (secret GitHub manquant ?)"; exit 1; }
+        done
         umask 077
         d="$RUNNER_TEMP/plateforme"
         mkdir -p "$d"

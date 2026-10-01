@@ -56,6 +56,14 @@ gestionnaire de mots de passe, nulle part ailleurs.
 | `plateforme-plan` | aucune | `PLATEFORME_KUBECONFIG_PLAN` |
 | `production` | **Required reviewers** : vous (et un collègue si possible) ; **Deployment branches** : `main` seulement | `PLATEFORME_KUBECONFIG_APPLY` |
 
+⚠ **Créer `production` AVANT de merger la PR de la plateforme.** Si un
+workflow cite un environnement qui n'existe pas, GitHub le crée tout seul…
+**sans aucune protection** : l'apply partirait sans approbation.
+
+Tant que les secrets ne sont pas posés, le plan des PR affiche un
+avertissement « Plateforme non raccordée » et ne fait rien (il ne rougit pas
+la PR) ; l'apply sur `main`, lui, échoue en nommant les secrets manquants.
+
 ### 2.5 Les secrets du dépôt Infra-server (*Settings → Secrets and variables → Actions*)
 | Secret | Valeur | D'où |
 |---|---|---|
@@ -82,12 +90,11 @@ Pourquoi une App et pas un jeton personnel (PAT) ? Le jeton de l'App vit
 et n'est attaché à aucune personne (départ d'un collègue = rien ne casse).
 
 ### 2.7 Protéger `main` (Infra-server → *Settings → Rules → Rulesets*)
-- exiger une PR, et les vérifications : les travaux de `plateforme · qualité` et `campagne` ;
-  ⚠ un workflow filtré par chemins (`paths:`) ne rend AUCUN statut sur une PR
-  qui ne touche pas ces chemins : un contrôle « requis » y resterait en
-  attente pour toujours. Soit on retire le filtre, soit on n'exige que les
-  contrôles toujours lancés, soit on ajoute un travail « garde » toujours
-  lancé qui résume les autres (TP 11) ;
+- exiger une PR, et ces vérifications : **`garde (qualité)`** (il résume tous
+  les travaux de `plateforme · qualité`, qui tourne sur TOUTES les PR) et
+  **`shellcheck et banc`** (`campagne`). Ne pas exiger `plan (lecture seule)` :
+  il ne tourne que si la PR touche au socle (un contrôle filtré par chemins
+  resterait « en attente » sur les autres PR) ;
 - interdire le force-push et la suppression ;
 - **Bypass list** : l'App `plateforme-gitops` (elle commit directement les
   promotions `deploy(<app>)` ; elle ne peut toucher qu'au contenu, et

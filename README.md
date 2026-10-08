@@ -26,6 +26,11 @@ installée sur le serveur**. On y fait passer les applications **une par une**
 — pilotage d'abord, paie en dernier — avec un retour arrière possible à
 chaque étape ([migration](docs/plateforme/09-migration.md)).
 
+> **Et une troisième brique : [Rail](paas/LISEZMOI.md)** — un « Railway » auto-hébergé pour déployer
+> *n'importe quelle API* depuis GitHub : on relie un dépôt, chaque `git push` construit, vérifie la santé,
+> bascule le trafic sans coupure (HTTPS automatique) et permet le retour arrière en un clic. Tableau de bord,
+> CLI et API. Indépendante des deux voies ci-dessus (elle veut les ports 80/443 pour elle).
+
 ---
 
 ## Sommaire

@@ -8,3 +8,7 @@
 crash.log
 # Helm : dépendances téléchargées
 plateforme/helm/*/charts/
+
+# Rail : la configuration locale porte les secrets.
+paas/.env
+paas/node_modules/

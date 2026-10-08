@@ -1,0 +1,56 @@
+# =====================================================================
+# Rail (paas/) : tests, lint des scripts, configuration Compose valide.
+# =====================================================================
+name: paas
+
+on:
+  push:
+    branches: [main]
+    paths: ["paas/**", ".github/workflows/paas.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["paas/**", ".github/workflows/paas.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: paas-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests du plan de contrôle
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Node 22 par l'image officielle : pas d'action tierce de plus à épingler.
+    container: node:22-bookworm
+    defaults:
+      run:
+        working-directory: paas
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Tests (git réel, Docker simulé, HTTP réel)
+        run: npm test
+
+  scripts:
+    name: install.sh et Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: shellcheck -x paas/install.sh
+      - name: Compose
+        working-directory: paas
+        run: |
+          sed -e 's|^DOCKER_GID=.*|DOCKER_GID=999|' .env.example > .env
+          docker compose config --quiet
+      - name: L'image du plan de contrôle se construit
+        working-directory: paas
+        run: docker build -t rail-control:ci .

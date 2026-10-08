@@ -1,0 +1,58 @@
+# Rail : Traefik (HTTPS + routage) et le plan de contrôle.
+# Les services des utilisateurs, eux, sont lancés par le plan de contrôle sur le réseau « rail ».
+name: rail
+
+services:
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # Les routes sont des fichiers que le plan de contrôle écrit : Traefik n'a PAS accès au socket docker.
+      - --providers.file.directory=/data/traefik/dynamic
+      - --providers.file.watch=true
+      - --certificatesresolvers.le.acme.email=${RAIL_ACME_EMAIL:?RAIL_ACME_EMAIL manquant dans .env}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+      - --global.checknewversion=false
+      - --global.sendanonymoususage=false
+      - --accesslog=true
+    ports:
+      - "${RAIL_BIND:-0.0.0.0}:80:80"
+      - "${RAIL_BIND:-0.0.0.0}:443:443"
+    volumes:
+      - rail-data:/data:ro
+      - traefik-acme:/letsencrypt
+    networks: [rail]
+    security_opt: ["no-new-privileges:true"]
+    # Le dossier des routes doit exister avant que Traefik ne le surveille.
+    depends_on:
+      control: { condition: service_healthy }
+
+  control:
+    build: .
+    image: rail-control:local
+    container_name: rail-control
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      RAIL_NETWORK: rail
+    # Le compte « node » du conteneur rejoint le groupe propriétaire du socket docker de l'hôte.
+    user: node
+    group_add: ["${DOCKER_GID:?DOCKER_GID manquant dans .env (install.sh le renseigne)}"]
+    volumes:
+      - rail-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [rail]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  rail-data:
+  traefik-acme:
+
+networks:
+  rail:
+    name: rail

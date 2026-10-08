@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rail</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#14171c;--mut:#667085;--line:#e3e6eb;--acc:#6d4aff;--acc-fg:#fff;--ok:#12805c;--ko:#c2352b;--warn:#b26a00;--code:#0f1115;--code-fg:#d7dae0}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1013;--card:#171a1f;--fg:#e8eaee;--mut:#98a2b3;--line:#262a31;--acc:#8b72ff;--acc-fg:#0e1013;--ok:#3ccf9a;--ko:#ff6b60;--warn:#f0b34a;--code:#08090b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;align-items:center;gap:16px;padding:14px 24px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:5}
+header a.logo{font-weight:700;font-size:18px;color:var(--fg);text-decoration:none;letter-spacing:-.02em}
+header .sp{flex:1}
+main{max-width:1000px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 10px}
+.mut{color:var(--mut)}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin:12px 0}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.row.sp{justify-content:space-between}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+a{color:var(--acc)}
+button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:6px 12px;border-radius:7px;cursor:pointer}
+button:hover{border-color:var(--acc)}
+button.pri{background:var(--acc);color:var(--acc-fg);border-color:var(--acc);font-weight:600}
+button.dng{color:var(--ko)}button:disabled{opacity:.5;cursor:default}
+input,select{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:7px;padding:6px 10px;min-width:0}
+input:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+label{display:block;font-size:13px;color:var(--mut);margin:10px 0 3px}
+form .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}@media(max-width:600px){form .grid2{grid-template-columns:1fr}}
+form input{width:100%}
+.badge{display:inline-block;padding:1px 9px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid currentColor}
+.s-success{color:var(--ok)}.s-failed,.s-canceled{color:var(--ko)}.s-building,.s-deploying,.s-queued{color:var(--warn)}.s-removed,.s-skipped,.s-none{color:var(--mut)}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:20px 0 4px;overflow-x:auto}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;padding:8px 14px}
+.tabs button.on{border-color:var(--acc);font-weight:600}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:middle}th{font-size:12px;color:var(--mut);font-weight:600}
+pre.log{background:var(--code);color:var(--code-fg);padding:12px;border-radius:8px;max-height:60vh;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12.5px/1.45 ui-monospace,Menlo,monospace;margin:8px 0}
+#toasts{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:6px;align-items:center;z-index:20}
+.toast{background:var(--fg);color:var(--bg);padding:9px 16px;border-radius:8px}
+.toast.err{background:var(--ko);color:#fff}
+dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);padding:20px;width:min(560px,94vw)}
+dialog::backdrop{background:#0008}
+.login{max-width:380px;margin:12vh auto}
+</style>
+</head>
+<body>
+<header><a class="logo" href="#/">▲ Rail</a><span class="mut" id="domain"></span><span class="sp"></span><button id="logout" hidden>Se déconnecter</button></header>
+<main id="app"></main>
+<div id="toasts" aria-live="polite"></div>
+<script>
+'use strict';
+const $app = document.getElementById('app');
+let token = sessionStorage.getItem('rail_token') || '';
+let cfg = {};
+
+// ── petits outils ────────────────────────────────────────────────────────
+// h() construit le DOM avec textContent : aucune donnée serveur n'est jamais interprétée comme du HTML.
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (v === true) el.setAttribute(k, '');
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null && k !== false) el.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return el;
+}
+const toast = (msg, err) => { const t = h('div', { class: 'toast' + (err ? ' err' : ''), role: 'status' }, msg); document.getElementById('toasts').append(t); setTimeout(() => t.remove(), err ? 6000 : 2500); };
+const ago = (iso) => { if (!iso) return ''; const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? 'à l’instant' : s < 3600 ? `il y a ${Math.floor(s / 60)} min` : s < 86400 ? `il y a ${Math.floor(s / 3600)} h` : `il y a ${Math.floor(s / 86400)} j`; };
+const badge = (s) => h('span', { class: `badge s-${s || 'none'}` }, { queued: 'en file', building: 'construction', deploying: 'démarrage', success: 'en ligne', failed: 'échec', canceled: 'annulé', skipped: 'remplacé', removed: 'remplacé' }[s] || 'jamais déployé');
+
+async function api(method, path, body) {
+  const res = await fetch('/api' + path, { method, headers: { authorization: `Bearer ${token}`, ...(body && { 'content-type': 'application/json' }) }, body: body ? JSON.stringify(body) : undefined });
+  if (res.status === 401) { logout(); throw new Error('Jeton invalide'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+  return data;
+}
+const act = (fn, okMsg) => async (ev) => {
+  const b = ev?.currentTarget; if (b) b.disabled = true;
+  try { const r = await fn(ev); if (okMsg) toast(okMsg); return r; } catch (e) { toast(e.message, true); } finally { if (b) b.disabled = false; }
+};
+function field(label, input) { return h('div', {}, h('label', {}, label), input); }
+
+// Suit un journal en continu (fetch en flux : EventSource ne sait pas envoyer l'en-tête d'autorisation).
+function followLog(path, pre) {
+  const ac = new AbortController();
+  (async () => {
+    try {
+      const res = await fetch('/api' + path, { headers: { authorization: `Bearer ${token}` }, signal: ac.signal });
+      if (!res.ok) { pre.textContent = (await res.json().catch(() => ({}))).error || 'Journal indisponible'; return; }
+      const rd = res.body.getReader(); const dec = new TextDecoder(); pre.textContent = '';
+      for (;;) {
+        const { done, value } = await rd.read(); if (done) break;
+        const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+        pre.append(dec.decode(value, { stream: true }));
+        if (atEnd) pre.scrollTop = pre.scrollHeight;
+      }
+    } catch { /* fermé */ }
+  })();
+  return () => ac.abort();
+}
+function logDialog(title, path) {
+  const pre = h('pre', { class: 'log' }, 'Chargement…');
+  const dlg = h('dialog', {}, h('div', { class: 'row sp' }, h('strong', {}, title), h('button', { onclick: () => dlg.close() }, 'Fermer')), pre);
+  document.body.append(dlg); dlg.showModal();
+  const stop = followLog(path, pre);
+  dlg.addEventListener('close', () => { stop(); dlg.remove(); });
+}
+
+// ── connexion ────────────────────────────────────────────────────────────
+function logout() { sessionStorage.removeItem('rail_token'); token = ''; render(); }
+document.getElementById('logout').onclick = logout;
+function loginView() {
+  const inp = h('input', { type: 'password', placeholder: 'Jeton d’administration', autocomplete: 'current-password', required: true });
+  const form = h('form', { class: 'card login', onsubmit: act(async (e) => {
+    e.preventDefault(); token = inp.value.trim();
+    await api('GET', '/config'); sessionStorage.setItem('rail_token', token); render();
+  }) }, h('h1', {}, 'Rail'), h('p', { class: 'mut' }, 'Déployez vos API depuis GitHub sur votre serveur.'), inp, h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Entrer')));
+  $app.replaceChildren(form); inp.focus();
+}
+
+// ── accueil : les projets ────────────────────────────────────────────────
+async function homeView() {
+  const projects = await api('GET', '/projects');
+  const nodes = [h('div', { class: 'row sp' }, h('div', {}, h('h1', {}, 'Projets'), h('div', { class: 'mut' }, 'Un projet regroupe les services qui vont ensemble.')),
+    h('button', { class: 'pri', onclick: () => newProjectDialog() }, '+ Nouveau projet'))];
+  if (!projects.length) nodes.push(h('div', { class: 'card mut' }, 'Aucun projet. Créez-en un, puis ajoutez-y un service relié à un dépôt GitHub.'));
+  for (const p of projects) {
+    nodes.push(h('h2', {}, p.name, ' ', h('button', { onclick: () => newServiceDialog(p) }, '+ Service')));
+    if (!p.services.length) nodes.push(h('div', { class: 'mut' }, 'Aucun service.'));
+    nodes.push(h('div', { class: 'grid' }, p.services.map((s) => h('a', { href: `#/services/${s.id}`, class: 'card', style: 'text-decoration:none;color:inherit;margin:0' },
+      h('div', { class: 'row sp' }, h('strong', {}, s.name), badge(s.latest_deployment?.status)),
+      h('div', { class: 'mut mono' }, s.repo, ' · ', s.branch),
+      h('div', { class: 'mut' }, s.latest_deployment ? `#${s.latest_deployment.number} ${ago(s.latest_deployment.created_at)}` : '—')))));
+    nodes.push(h('div', {}, h('button', { class: 'dng', onclick: act(async () => { if (confirm(`Supprimer le projet « ${p.name} » et tous ses services ?`)) { await api('DELETE', `/projects/${p.id}`); render(); } }) }, 'Supprimer le projet')));
+  }
+  $app.replaceChildren(...nodes);
+}
+function newProjectDialog() {
+  const name = h('input', { required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?', placeholder: 'mon-projet' });
+  const dlg = h('dialog', {}, h('form', { method: 'dialog', onsubmit: act(async (e) => { e.preventDefault(); await api('POST', '/projects', { name: name.value }); dlg.close(); render(); }) },
+    h('h1', {}, 'Nouveau projet'), field('Nom (minuscules, chiffres, tirets)', name),
+    h('p', { class: 'row' }, h('button', { class: 'pri', type: 'submit' }, 'Créer'), h('button', { type: 'button', onclick: () => dlg.close() }, 'Annuler'))));
+  dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal(); name.focus();
+}
+function newServiceDialog(p) {
+  const f = {
+    name: h('input', { required: true, placeholder: 'api' }),
+    repo: h('input', { required: true, placeholder: 'propriétaire/dépôt' }),
+    branch: h('input', { value: 'main' }), root_dir: h('input', { value: '.' }),
+    port: h('input', { type: 'number', value: '3000', min: 1, max: 65535 }), healthcheck_path: h('input', { placeholder: '/health (facultatif)' }),
+    github_token: h('input', { type: 'password', placeholder: 'dépôt privé : jeton avec droit « Contents: read »', autocomplete: 'off' }),
+  };
+  const dlg = h('dialog', {}, h('form', { method: 'dialog', onsubmit: act(async (e) => {
+    e.preventDefault();
+    const s = await api('POST', `/projects/${p.id}/services`, { name: f.name.value, repo: f.repo.value, branch: f.branch.value, root_dir: f.root_dir.value, port: +f.port.value, healthcheck_path: f.healthcheck_path.value || null, github_token: f.github_token.value || null });
+    dlg.close(); location.hash = `#/services/${s.id}`;
+  }) }, h('h1', {}, `Nouveau service — ${p.name}`),
+  h('div', { class: 'grid2' }, field('Nom', f.name), field('Dépôt GitHub', f.repo), field('Branche', f.branch), field('Dossier racine', f.root_dir), field('Port de l’API', f.port), field('Chemin de santé', f.healthcheck_path)),
+  field('Jeton GitHub', f.github_token),
+  h('p', { class: 'mut' }, 'Sans Dockerfile, Rail détecte Node, Python, Go ou Java et construit pour vous.'),
+  h('p', { class: 'row' }, h('button', { class: 'pri', type: 'submit' }, 'Créer'), h('button', { type: 'button', onclick: () => dlg.close() }, 'Annuler'))));
+  dlg.addEventListener('close', () => dlg.remove()); document.body.append(dlg); dlg.showModal(); f.name.focus();
+}
+
+// ── un service ───────────────────────────────────────────────────────────
+let tab = 'deployments'; let timer = null;
+async function serviceView(id) {
+  const s = await api('GET', `/services/${id}`);
+  const deps = await api('GET', `/services/${id}/deployments`);
+  const busy = deps.some((d) => ['queued', 'building', 'deploying'].includes(d.status));
+  const head = h('div', {},
+    h('div', { class: 'row sp' }, h('div', {}, h('h1', {}, s.name), h('div', { class: 'mut mono' }, s.repo, ' · ', s.branch)),
+      h('div', { class: 'row' }, badge(s.latest_deployment?.status),
+        h('button', { class: 'pri', onclick: act(async () => { await api('POST', `/services/${id}/deploy`, {}); render(); }, 'Déploiement lancé') }, 'Déployer'),
+        s.active_deployment && h('button', { onclick: act(async () => { await api('POST', `/services/${id}/redeploy`); render(); }, 'Redéploiement lancé') }, 'Redéployer'))),
+    s.url ? h('p', {}, '🌐 ', h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.url)) : null);
+  const tabs = h('div', { class: 'tabs', role: 'tablist' }, [['deployments', 'Déploiements'], ['variables', 'Variables'], ['domains', 'Domaines'], ['logs', 'Logs'], ['settings', 'Réglages']].map(([k, l]) =>
+    h('button', { role: 'tab', class: tab === k ? 'on' : '', onclick: () => { tab = k; render(); } }, l)));
+  const body = h('div', {});
+  $app.replaceChildren(h('p', {}, h('a', { href: '#/' }, '← Projets')), head, tabs, body);
+  if (tab === 'deployments') deploymentsTab(body, s, deps);
+  if (tab === 'variables') await variablesTab(body, s);
+  if (tab === 'domains') domainsTab(body, s);
+  if (tab === 'logs') logsTab(body, s);
+  if (tab === 'settings') settingsTab(body, s);
+  if (busy && tab === 'deployments') timer = setTimeout(render, 2500);
+}
+function deploymentsTab(body, s, deps) {
+  if (!deps.length) return body.append(h('div', { class: 'card mut' }, 'Aucun déploiement. Cliquez sur « Déployer », ou configurez le webhook (Réglages) pour déployer à chaque push.'));
+  body.append(h('table', {}, h('thead', {}, h('tr', {}, ['#', 'Statut', 'Commit', 'Quand', ''].map((t) => h('th', {}, t)))), h('tbody', {}, deps.map((d) => h('tr', {},
+    h('td', { class: 'mono' }, d.number), h('td', {}, badge(d.status), d.error ? h('div', { class: 'mut', style: 'font-size:12px' }, d.error) : null),
+    h('td', {}, h('span', { class: 'mono' }, (d.commit_sha || '').slice(0, 7)), ' ', d.commit_message || '', d.trigger !== 'push' && d.trigger !== 'manual' ? h('span', { class: 'mut' }, ` (${d.trigger === 'rollback' ? 'retour arrière' : 'redéploiement'})`) : ''),
+    h('td', { class: 'mut' }, ago(d.created_at)),
+    h('td', { class: 'row', style: 'justify-content:flex-end' },
+      h('button', { onclick: () => logDialog(`Déploiement #${d.number}`, `/deployments/${d.id}/logs?follow=1`) }, 'Logs'),
+      ['success', 'removed'].includes(d.status) && d.id !== s.active_deployment_id && d.image ? h('button', { onclick: act(async () => { if (confirm(`Remettre le déploiement #${d.number} en service ?`)) { await api('POST', `/deployments/${d.id}/rollback`); render(); } }) }, 'Revenir ici') : null,
+      ['queued', 'building', 'deploying'].includes(d.status) ? h('button', { class: 'dng', onclick: act(async () => { await api('POST', `/deployments/${d.id}/cancel`); render(); }) }, 'Annuler') : null))))));
+}
+async function variablesTab(body, s) {
+  const vars = await api('GET', `/services/${s.id}/variables`);
+  const rows = h('div', {});
+  const addRow = (k = '', v = '') => rows.append(h('div', { class: 'row', style: 'margin:6px 0' },
+    h('input', { class: 'k mono', placeholder: 'NOM', value: k, style: 'flex:1' }), h('input', { class: 'v mono', placeholder: 'valeur', value: v, style: 'flex:2' }),
+    h('button', { class: 'dng', title: 'Retirer', onclick: (e) => e.currentTarget.parentElement.remove() }, '✕')));
+  Object.entries(vars).forEach(([k, v]) => addRow(k, v));
+  const save = act(async () => {
+    const next = {};
+    for (const r of rows.children) { const k = r.querySelector('.k').value.trim(); if (k) next[k] = r.querySelector('.v').value; }
+    for (const k of Object.keys(vars)) if (!(k in next)) await api('DELETE', `/services/${s.id}/variables/${encodeURIComponent(k)}`);
+    await api('PUT', `/services/${s.id}/variables`, { variables: next });
+  }, 'Variables enregistrées — redéployez pour les appliquer');
+  body.append(h('div', { class: 'card' }, h('p', { class: 'mut' }, 'Disponibles dans votre API comme variables d’environnement. ', h('span', { class: 'mono' }, 'PORT'), ' et ', h('span', { class: 'mono' }, 'RAIL_*'), ' sont fournies par Rail. Les valeurs sont chiffrées au repos.'), rows,
+    h('div', { class: 'row' }, h('button', { onclick: () => addRow() }, '+ Variable'), h('button', { class: 'pri', onclick: save }, 'Enregistrer'),
+      h('button', { onclick: act(async () => { await save(); await api('POST', `/services/${s.id}/redeploy`); render(); }) }, 'Enregistrer et redéployer'))));
+}
+function domainsTab(body, s) {
+  const host = h('input', { placeholder: 'api.mondomaine.com', style: 'flex:1' });
+  body.append(h('div', { class: 'card' },
+    h('table', {}, h('tbody', {}, s.domains.map((d) => h('tr', {}, h('td', {}, h('a', { href: `https://${d.hostname}`, target: '_blank', rel: 'noopener' }, d.hostname)), h('td', { class: 'mut' }, d.kind === 'auto' ? 'fourni' : 'personnalisé'),
+      h('td', { style: 'text-align:right' }, h('button', { class: 'dng', onclick: act(async () => { await api('DELETE', `/services/${s.id}/domains/${d.id}`); render(); }) }, 'Retirer')))))),
+    h('div', { class: 'row', style: 'margin-top:12px' }, host, h('button', { class: 'pri', onclick: act(async () => { await api('POST', `/services/${s.id}/domains`, { hostname: host.value }); render(); }, 'Domaine ajouté — redéployez pour l’appliquer') }, 'Ajouter')),
+    h('p', { class: 'mut' }, `Pour un domaine personnalisé : créez un enregistrement DNS A (ou CNAME vers ${cfg.dashboardHost || 'le serveur'}) vers ce serveur, ajoutez-le ici puis cliquez sur « Redéployer ». Le certificat HTTPS est obtenu automatiquement.`)));
+}
+function logsTab(body, s) {
+  const pre = h('pre', { class: 'log' }, 'Chargement…');
+  body.append(h('p', { class: 'mut' }, 'Sortie du conteneur en service (en direct).'), pre);
+  const stop = followLog(`/services/${s.id}/logs?follow=1&tail=300`, pre);
+  cleanup = stop;
+}
+function settingsTab(body, s) {
+  const f = {
+    repo: h('input', { value: s.repo }), branch: h('input', { value: s.branch }), root_dir: h('input', { value: s.root_dir }), dockerfile_path: h('input', { value: s.dockerfile_path || '', placeholder: 'auto' }),
+    port: h('input', { type: 'number', value: s.port }), healthcheck_path: h('input', { value: s.healthcheck_path || '', placeholder: '/health' }),
+    memory_mb: h('input', { type: 'number', value: s.memory_mb || '', placeholder: 'défaut' }), cpus: h('input', { type: 'number', step: '0.1', value: s.cpus || '', placeholder: 'défaut' }),
+    github_token: h('input', { type: 'password', placeholder: s.has_github_token ? '•••••• (enregistré — laisser vide pour conserver)' : 'aucun', autocomplete: 'off' }),
+  };
+  const auto = h('input', { type: 'checkbox', checked: s.auto_deploy, style: 'width:auto' });
+  const save = act(async (e) => {
+    e.preventDefault();
+    const p = { repo: f.repo.value, branch: f.branch.value, root_dir: f.root_dir.value, dockerfile_path: f.dockerfile_path.value || null, port: +f.port.value, healthcheck_path: f.healthcheck_path.value || null, memory_mb: f.memory_mb.value ? +f.memory_mb.value : null, cpus: f.cpus.value ? +f.cpus.value : null, auto_deploy: auto.checked };
+    if (f.github_token.value) p.github_token = f.github_token.value;
+    await api('PATCH', `/services/${s.id}`, p); render();
+  }, 'Réglages enregistrés');
+  const copy = (t) => navigator.clipboard?.writeText(t).then(() => toast('Copié'));
+  body.append(
+    h('form', { class: 'card', onsubmit: save },
+      h('div', { class: 'grid2' }, field('Dépôt', f.repo), field('Branche suivie', f.branch), field('Dossier racine', f.root_dir), field('Dockerfile (chemin)', f.dockerfile_path), field('Port', f.port), field('Chemin de santé', f.healthcheck_path), field('Mémoire (Mo)', f.memory_mb), field('CPU', f.cpus)),
+      field('Jeton GitHub', f.github_token),
+      h('label', { class: 'row', style: 'color:var(--fg);margin-top:14px' }, auto, 'Déployer automatiquement à chaque push sur la branche'),
+      h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Enregistrer'))),
+    h('div', { class: 'card' }, h('h2', { style: 'margin-top:0' }, 'Déploiement à chaque push (webhook GitHub)'),
+      h('p', { class: 'mut' }, 'Automatique si un jeton avec le droit « Webhooks: write » est enregistré :'),
+      h('p', {}, h('button', { onclick: act(async () => { await api('POST', `/services/${s.id}/webhook/install`); }, 'Webhook installé sur GitHub') }, 'Installer le webhook')),
+      h('p', { class: 'mut' }, 'Ou à la main (Settings → Webhooks → Add webhook), type « application/json », événement « push » :'),
+      h('div', { class: 'row' }, h('span', { class: 'mono' }, s.webhook.url), h('button', { onclick: () => copy(s.webhook.url) }, 'Copier')),
+      h('div', { class: 'row' }, h('span', { class: 'mono' }, 'Secret : ••••••••'), h('button', { onclick: () => copy(s.webhook.secret) }, 'Copier le secret'))),
+    h('div', { class: 'card' }, h('h2', { style: 'margin-top:0;color:var(--ko)' }, 'Zone dangereuse'),
+      h('button', { class: 'dng', onclick: act(async () => { if (confirm(`Supprimer « ${s.name} » (conteneurs et images compris) ?`)) { await api('DELETE', `/services/${s.id}`); location.hash = '#/'; } }) }, 'Supprimer ce service')));
+}
+
+// ── routage ──────────────────────────────────────────────────────────────
+let cleanup = null;
+async function render() {
+  clearTimeout(timer); cleanup?.(); cleanup = null;
+  document.getElementById('logout').hidden = !token;
+  if (!token) return loginView();
+  try {
+    cfg = { ...cfg, ...(await api('GET', '/config')) };
+    document.getElementById('domain').textContent = cfg.domain;
+    const m = /^#\/services\/([a-f0-9]+)/.exec(location.hash);
+    await (m ? serviceView(m[1]) : homeView());
+  } catch (e) { if (token) $app.replaceChildren(h('div', { class: 'card' }, h('strong', {}, 'Erreur'), h('p', {}, e.message), h('button', { onclick: render }, 'Réessayer'))); }
+}
+addEventListener('hashchange', () => { if (!/services/.test(location.hash)) tab = 'deployments'; render(); });
+render();
+</script>
+</body>
+</html>

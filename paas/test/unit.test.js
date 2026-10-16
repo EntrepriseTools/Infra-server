@@ -296,3 +296,20 @@ test('sql : lire le CSV de psql et le TSV de mysql', async () => {
   assert.equal(gros.total, 2500);
   assert.equal(gros.truncated, true);
 });
+
+test('runtime : le client docker garde son PATH même quand le service a ses propres variables', async () => {
+  const { DockerRuntime } = await import('../src/runtime.js');
+  // Un faux « docker » qui imprime son environnement : on lit exactement ce que
+  // recevrait le vrai client. Sans PATH, spawn échoue sur « docker ENOENT ».
+  const dir = tmp();
+  const faux = path.join(dir, 'faux-docker');
+  fs.writeFileSync(faux, '#!/bin/sh\nenv\n', { mode: 0o755 });
+  const r = new DockerRuntime({ network: 'rail', docker: faux });
+  const sortie = await r.start({ name: 'x', image: 'img', env: { SECRET: 'top', PORT: '3000' } });
+  assert.match(sortie, /^PATH=/m, 'le PATH doit survivre aux variables du service');
+  assert.match(sortie, /^SECRET=top$/m, 'les variables du service passent par l\'environnement');
+  assert.match(sortie, /^DOCKER_BUILDKIT=1$/m);
+  const execSortie = await r.exec('x', ['peu importe'], { env: { MYSQL_PWD: 's3cret' } });
+  assert.match(execSortie, /^PATH=/m);
+  assert.match(execSortie, /^MYSQL_PWD=s3cret$/m);
+});

@@ -48,7 +48,10 @@ export class DockerRuntime {
     for (const k of CLIENT_ENV_KEEP) if (process.env[k]) e[k] = process.env[k];
     return { ...e, DOCKER_BUILDKIT: '1', ...extra };
   }
-  #d(args, opts = {}) { return run(this.docker, args, { env: this.#env(opts.env), ...opts }); }
+  // L'environnement calculé passe EN DERNIER : sinon l'étalement de `opts` le remplace
+  // par les seules variables du service, le client docker perd son PATH, et spawn
+  // échoue sur « docker ENOENT ».
+  #d(args, opts = {}) { return run(this.docker, args, { ...opts, env: this.#env(opts.env) }); }
 
   async ensureNetwork() {
     try { await this.#d(['network', 'inspect', this.network]); }

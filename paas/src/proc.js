@@ -2,25 +2,28 @@
 import { spawn } from 'node:child_process';
 
 export class ProcError extends Error {
-  constructor(msg, code, out) { super(msg); this.code = code; this.output = out; }
+  constructor(msg, code, out, err = '') { super(msg); this.code = code; this.output = out; this.stderr = err; }
 }
 
 /** Exécute `cmd args`, envoie chaque morceau de sortie à onData, rejette si code ≠ 0. */
-export function run(cmd, args, { env, cwd, onData, signal, timeoutMs, input } = {}) {
+export function run(cmd, args, { env, cwd, onData, onErr, signal, timeoutMs, input } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { env, cwd, signal, stdio: [input ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
+    const child = spawn(cmd, args, { env, cwd, signal, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     let out = '';
+    let err = '';
     let timer;
     const take = (b) => { const t = b.toString('utf8'); out = (out + t).slice(-20000); onData?.(t); };
+    // Sans onErr, les deux flux se mélangent comme avant (les journaux de build les veulent ensemble).
+    const takeErr = (b) => { const t = b.toString('utf8'); err = (err + t).slice(-20000); if (onErr) onErr(t); else take(b); };
     child.stdout.on('data', take);
-    child.stderr.on('data', take);
-    if (input) child.stdin.end(input);
+    child.stderr.on('data', takeErr);
+    if (input !== undefined) child.stdin.end(input);
     if (timeoutMs) timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    child.on('error', (e) => { clearTimeout(timer); reject(e.name === 'AbortError' ? new ProcError('annulé', null, out) : e); });
+    child.on('error', (e) => { clearTimeout(timer); reject(e.name === 'AbortError' ? new ProcError('annulé', null, out, err) : e); });
     child.on('close', (code, sig) => {
       clearTimeout(timer);
       if (code === 0) resolve(out);
-      else reject(new ProcError(`${cmd} ${args[0] ?? ''} a échoué (${sig ? `signal ${sig}` : `code ${code}`})`, code, out));
+      else reject(new ProcError(`${cmd} ${args[0] ?? ''} a échoué (${sig ? `signal ${sig}` : `code ${code}`})`, code, out, err));
     });
   });
 }

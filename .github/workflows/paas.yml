@@ -35,6 +35,8 @@ jobs:
           persist-credentials: false
       - name: Tests (git réel, Docker simulé, HTTP réel)
         run: npm test
+      - name: Le tableau de bord se lit (syntaxe des modules du navigateur)
+        run: npm run check
 
   scripts:
     name: install.sh et Compose
@@ -45,7 +47,7 @@ jobs:
         with:
           persist-credentials: false
       - name: shellcheck
-        run: shellcheck -x paas/install.sh
+        run: shellcheck -x paas/install.sh paas/sauvegarde.sh paas/test/integration.sh
       - name: Compose
         working-directory: paas
         run: |
@@ -54,3 +56,17 @@ jobs:
       - name: L'image du plan de contrôle se construit
         working-directory: paas
         run: docker build -t rail-control:ci .
+
+  integration:
+    name: déploiement réel contre le Docker de la machine
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # Le plan de contrôle tourne dans son image, parle au vrai démon Docker,
+      # déploie une vraie base PostgreSQL, la mesure, la sauvegarde et la supprime.
+      - name: Déployer pour de vrai
+        working-directory: paas
+        run: ./test/integration.sh

@@ -1,22 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { env, makeRepo } from './helpers.js';
-import { createApp } from '../src/api.js';
+import { env, makeRepo, serve } from './helpers.js';
 
 async function boot() {
   const e = env();
   const repo = makeRepo(e.dir, 'acme/api', { 'package.json': '{"scripts":{"start":"x"}}' });
-  const server = createApp({ ...e, runtime: e.runtime, github: e.github });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const call = async (method, path, body, token = e.config.adminToken, headers = {}) => {
-    const res = await fetch(base + path, { method, headers: { ...(token && { authorization: `Bearer ${token}` }), ...(body && { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body) });
-    const text = await res.text();
-    let json; try { json = JSON.parse(text); } catch { json = text; }
-    return { status: res.status, body: json, headers: res.headers };
-  };
-  return { e, repo, server, call, close: () => server.close() };
+  return { e, repo, ...(await serve(e)) };
 }
 
 test('authentification : jeton obligatoire sauf /api/health et le webhook', async () => {
@@ -171,5 +161,103 @@ test('CLI : projets, service, déploiement, variables, retour arrière', async (
   assert.match(await rail('rollback', id), /retour arrière : déploiement #2/);
   await e.deployer.drain();
   await assert.rejects(rail('service', 'demo/inconnu'), /introuvable/);
+  close();
+});
+
+test('vue d\'ensemble, système et mesures : de quoi peindre le tableau de bord en un appel', async () => {
+  const { e, call, close } = await boot();
+  const p = (await call('POST', '/api/projects', { name: 'demo' })).body;
+  const svc = (await call('POST', `/api/projects/${p.id}/services`, { name: 'api', repo: 'acme/api' })).body;
+  await call('POST', `/api/services/${svc.id}/deploy`, {});
+  await e.deployer.drain();
+  await e.monitor.tick();
+
+  const o = (await call('GET', '/api/overview')).body;
+  assert.equal(o.projects[0].services[0].name, 'api');
+  assert.equal(o.projects[0].services[0].status.state, 'running');
+  assert.ok(o.system.mem_total > 0 && o.system.cpus >= 1);
+  assert.equal(o.system.docker, '27.0.0-test');
+  assert.equal(o.system.states.running, 1);
+  assert.ok(o.events.some((x) => x.kind === 'deployment.success'));
+
+  const sys = (await call('GET', '/api/system')).body;
+  assert.equal(sys.services, 1);
+  assert.ok(sys.df.images);
+  assert.equal(sys.version, (await call('GET', '/api/config')).body.version);
+
+  const m = (await call('GET', `/api/services/${svc.id}/metrics?range=6h`)).body;
+  assert.equal(m.range, '6h');
+  assert.equal(m.points.length, 1);
+  assert.equal(m.current.cpu, 5.5);
+  assert.equal(m.uptime, 1);
+  assert.equal(m.limits.memory_mb, 512);
+  assert.equal((await call('GET', `/api/services/${svc.id}/metrics?range=1siecle`)).status, 400);
+  assert.ok((await call('GET', '/api/system/metrics?range=1h')).body.points.length >= 1);
+
+  const ev = (await call('GET', `/api/events?service_id=${svc.id}&limit=5`)).body;
+  assert.ok(ev.every((x) => x.service_id === svc.id));
+  assert.equal((await call('GET', '/api/events?level=error')).body.length, 0);
+
+  assert.equal((await call('GET', `/api/services/${svc.id}/status`)).body.state, 'running');
+  assert.equal((await call('POST', '/api/system/prune')).status, 200);
+  close();
+});
+
+test('marche/arrêt par l\'API : état voulu, route, et refus quand il n\'y a rien à démarrer', async () => {
+  const { e, call, close } = await boot();
+  const p = (await call('POST', '/api/projects', { name: 'demo' })).body;
+  const svc = (await call('POST', `/api/projects/${p.id}/services`, { name: 'api', repo: 'acme/api' })).body;
+  assert.equal((await call('POST', `/api/services/${svc.id}/start`)).status, 409, 'rien à démarrer avant le premier déploiement');
+
+  await call('POST', `/api/services/${svc.id}/deploy`, {});
+  await e.deployer.drain();
+  assert.equal((await call('POST', `/api/services/${svc.id}/stop`)).body.state, 'stopped');
+  assert.equal((await call('GET', `/api/services/${svc.id}`)).body.desired_state, 'stopped');
+  assert.equal((await call('POST', `/api/services/${svc.id}/start`)).body.state, 'running');
+  assert.equal((await call('POST', `/api/services/${svc.id}/restart`)).body.state, 'running');
+  assert.equal((await call('POST', '/api/services/inconnu/stop')).status, 404);
+  close();
+});
+
+test('le tableau de bord est servi en plusieurs fichiers, avec une CSP sans script en ligne', async () => {
+  const { call, close } = await boot();
+  for (const [p, type] of [['/', /text\/html/], ['/app.js', /javascript/], ['/ui.js', /javascript/], ['/style.css', /text\/css/]]) {
+    const r = await call('GET', p, undefined, null);
+    assert.equal(r.status, 200, p);
+    assert.match(r.headers.get('content-type'), type, p);
+    assert.match(r.headers.get('content-security-policy'), /script-src 'self'; /);
+  }
+  close();
+});
+
+test('CLI : état du serveur, bases de données, mesures, marche/arrêt', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { e, close, server } = await boot();
+  const rail = async (...a) => (await promisify(execFile)('node', ['bin/rail.js', ...a], {
+    env: { PATH: process.env.PATH, RAIL_URL: `http://127.0.0.1:${server.address().port}`, RAIL_TOKEN: e.config.adminToken },
+    maxBuffer: 4 * 1024 * 1024,
+  })).stdout;
+
+  await rail('project:new', 'demo');
+  await rail('service:new', 'demo', 'api', 'acme/api');
+  assert.match(await rail('engines'), /postgres\s+PostgreSQL 16/);
+  assert.match(await rail('db:new', 'demo', 'base', '--engine', 'postgres'), /hôte privé : base\.demo\.internal:5432/);
+  await e.deployer.drain();
+  assert.match(await rail('db:url', 'demo/base'), /^postgresql:\/\/rail:/);
+  assert.match(await rail('backup', 'demo/base'), /sauvegarde/);
+
+  await rail('deploy', 'demo/api'); await e.deployer.drain();
+  await e.monitor.tick();
+  const status = await rail('status');
+  assert.match(status, /Rail v/);
+  assert.match(status, /api\s+running/);
+  assert.match(status, /🗄 base/);
+  assert.match(await rail('metrics', 'demo/api'), /processeur .* 5\.5%/);
+  assert.match(await rail('events', '-n', '5'), /déploiement #1 en service/);
+  assert.match(await rail('stop', 'demo/api'), /stopped/);
+  assert.match(await rail('start', 'demo/api'), /running/);
+  assert.match(await rail('restart', 'demo/api'), /running/);
+  assert.match(await rail('prune'), /reclaimed/);
   close();
 });

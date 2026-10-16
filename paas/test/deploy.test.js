@@ -37,6 +37,7 @@ test('déploiement nominal : clone → build → démarre → sain → route →
   assert.equal(env_.PORT, '3000'); assert.equal(env_.RAIL_GIT_COMMIT_SHA, repo.first);
   assert.equal(env_.RAIL_PUBLIC_DOMAIN, 'api-demo.apps.test.dev');
   assert.equal(e.runtime.last.alias, 'api.demo.internal');
+  assert.deepEqual(e.runtime.last.caps, [], 'un service ordinaire n\'a aucune capacité en plus');
   assert.match(e.logs.read(dep.id), /construction automatique \(node\)/);
   assert.deepEqual(e.statuses.map((s) => s.state), ['pending', 'success']);
   assert.ok(!fs.existsSync(path.join(e.config.buildsDir, dep.id)), 'le dossier de build est nettoyé');
@@ -246,4 +247,112 @@ test('un journal suivi en direct reçoit TOUTES les lignes, jusqu\'à la derniè
   assert.ok(ended);
   assert.match(got, /En service sur https:\/\/api-demo/);
   assert.equal(got, e.logs.read(dep.id));
+});
+
+test('arrêt et redémarrage : la route disparaît, le conteneur survit, rien ne se reconstruit', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  const container = `rail-${svc.id}-1`;
+  const builds = e.runtime.calls.filter((c) => c.startsWith('build')).length;
+
+  await e.deployer.stopService(svc.id);
+  assert.equal(e.store.getService(svc.id).desired_state, 'stopped');
+  assert.ok(!fs.existsSync(routeFile(e, svc.id)), 'plus de route : le service répond 404');
+  assert.equal(await e.runtime.state(container), 'exited');
+  assert.equal(e.store.listEvents({ limit: 1 })[0].kind, 'service.stopped');
+
+  await e.deployer.startService(svc.id);
+  assert.equal(e.store.getService(svc.id).desired_state, 'running');
+  assert.equal(await e.runtime.state(container), 'running');
+  assert.equal(upstream(e, svc.id), `http://${container}:3000`);
+  assert.equal(e.runtime.calls.filter((c) => c.startsWith('build')).length, builds, 'aucune reconstruction');
+
+  await e.deployer.restartService(svc.id);
+  assert.equal(e.runtime.restarts[container], 1);
+  assert.equal(e.store.listDeployments(svc.id).length, 1, 'redémarrer n\'est pas déployer');
+});
+
+test('démarrer un service dont le conteneur a disparu relance l\'image', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  await e.deployer.stopService(svc.id);
+  e.runtime.containers.clear(); // le conteneur a été supprimé à la main
+  const r = await e.deployer.startService(svc.id);
+  await e.deployer.drain();
+  assert.ok(r.deployment, 'un déploiement a été relancé');
+  assert.equal(e.store.getDeployment(r.deployment.id).status, 'success');
+  assert.equal(e.runtime.calls.filter((c) => c.startsWith('build')).length, 1, 'l\'image existante est réutilisée');
+});
+
+test('déployer un service arrêté le remet en marche', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  await e.deployer.stopService(svc.id);
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  assert.equal(e.store.getService(svc.id).desired_state, 'running');
+  assert.ok(fs.existsSync(routeFile(e, svc.id)));
+});
+
+test('reconcile : un conteneur resté sur le carreau après un reboot est relancé', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  const container = `rail-${svc.id}-1`;
+  e.runtime.containers.set(container, 'exited');
+  fs.rmSync(routeFile(e, svc.id));
+  await e.deployer.reconcile();
+  assert.equal(await e.runtime.state(container), 'running');
+  assert.ok(fs.existsSync(routeFile(e, svc.id)));
+});
+
+test('reconcile : un service arrêté exprès le reste', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  await e.deployer.stopService(svc.id);
+  await e.deployer.reconcile();
+  assert.ok(!fs.existsSync(routeFile(e, svc.id)));
+  assert.equal(await e.runtime.state(`rail-${svc.id}-1`), 'exited');
+});
+
+test('journal des conteneurs : rotation imposée, pour qu\'un service bavard ne remplisse pas le disque', async () => {
+  const { e, svc } = await setup();
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  assert.equal(e.store.listEvents({ limit: 20 }).filter((x) => x.kind === 'deployment.success').length, 1);
+  assert.equal(e.config.logMaxSizeMb, 10);
+  assert.equal(e.config.logMaxFiles, 3);
+});
+
+test('échec : l\'événement et l\'alerte partent avec la raison', async () => {
+  const { e, svc } = await setup();
+  e.runtime.buildError = 'npm ERR! boom';
+  e.deployer.deploy(svc.id); await e.deployer.drain();
+  const ev = e.store.listEvents({ limit: 10 }).find((x) => x.kind === 'deployment.failed');
+  assert.match(ev.message, /boom/);
+  assert.equal(ev.level, 'error');
+  assert.equal(e.notifier.sent.at(-1).level, 'error');
+});
+
+test('arrêter pendant une construction : le déploiement est annulé, la requête ne patiente pas', async () => {
+  const { e, svc } = await setup();
+  const origBuild = e.runtime.build.bind(e.runtime);
+  e.runtime.build = async (o) => { await new Promise((r) => setTimeout(r, 300)); return origBuild(o); };
+  const dep = e.deployer.deploy(svc.id);
+  await new Promise((r) => setTimeout(r, 20));
+  const t0 = Date.now();
+  await e.deployer.stopService(svc.id);
+  assert.ok(Date.now() - t0 < 250, 'on n\'attend pas la fin de la construction');
+  await e.deployer.drain();
+  assert.equal(e.store.getDeployment(dep.id).status, 'canceled');
+  assert.equal(e.store.getService(svc.id).desired_state, 'stopped');
+});
+
+test('démarrer ou redémarrer pendant un déploiement : refusé plutôt que mis en attente', async () => {
+  const { e, svc } = await setup();
+  const origBuild = e.runtime.build.bind(e.runtime);
+  e.runtime.build = async (o) => { await new Promise((r) => setTimeout(r, 200)); return origBuild(o); };
+  e.deployer.deploy(svc.id);
+  await new Promise((r) => setTimeout(r, 20));
+  await assert.rejects(() => e.deployer.restartService(svc.id), /déploiement est en cours/);
+  await assert.rejects(() => e.deployer.startService(svc.id), /déploiement est en cours/);
+  await e.deployer.drain();
+  assert.equal(e.store.listDeployments(svc.id)[0].status, 'success');
 });

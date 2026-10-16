@@ -313,3 +313,40 @@ test('runtime : le client docker garde son PATH même quand le service a ses pro
   assert.match(execSortie, /^PATH=/m);
   assert.match(execSortie, /^MYSQL_PWD=s3cret$/m);
 });
+
+test('config : trois façons d\'entrer (ports libres, proxy devant, DNS-01)', () => {
+  const base = { RAIL_ADMIN_TOKEN: 'x'.repeat(24), RAIL_SECRET_KEY: 'a'.repeat(64), RAIL_DOMAIN: 'apps.exemple.com' };
+  const acme = loadConfig(base);
+  assert.equal(acme.tlsMode, 'acme');
+  assert.deepEqual([acme.httpPort, acme.httpsPort], [80, 443]);
+  assert.equal(acme.entryPoint, 'websecure');
+  assert.equal(acme.certResolver, 'le');
+  assert.equal(acme.urlFor('api-demo.apps.exemple.com'), 'https://api-demo.apps.exemple.com');
+
+  // Derrière nginx : Rail n'écoute qu'en clair, mais l'adresse publique reste en https.
+  const proxy = loadConfig({ ...base, RAIL_TLS: 'proxy', RAIL_HTTP_PORT: '8080' });
+  assert.equal(proxy.httpPort, 8080);
+  assert.equal(proxy.entryPoint, 'web');
+  assert.equal(proxy.certResolver, null);
+  assert.equal(proxy.urlFor('api-demo.apps.exemple.com'), 'https://api-demo.apps.exemple.com');
+  assert.equal(proxy.publicUrl, 'https://rail.apps.exemple.com');
+
+  // Ports à soi : le port se montre dans les adresses.
+  const dns = loadConfig({ ...base, RAIL_TLS: 'dns', RAIL_HTTP_PORT: '8080', RAIL_HTTPS_PORT: '8443' });
+  assert.equal(dns.urlFor('api-demo.apps.exemple.com'), 'https://api-demo.apps.exemple.com:8443');
+  assert.equal(dns.publicUrl, 'https://rail.apps.exemple.com:8443');
+  assert.equal(loadConfig({ ...base, RAIL_SITE_SCHEME: 'http', RAIL_SITE_PORT: '8080' }).urlFor('x.exemple.com'), 'http://x.exemple.com:8080');
+
+  assert.throws(() => loadConfig({ ...base, RAIL_TLS: 'autre' }), /acme, dns ou proxy/);
+  assert.throws(() => loadConfig({ ...base, RAIL_HTTP_PORT: '0' }), /port valide/);
+});
+
+test('routes : derrière un proxy, pas de TLS dans le fichier de route', () => {
+  const d = tmp();
+  const r = new Routes(d, { entryPoint: 'web', certResolver: null });
+  r.set('abc', { hosts: ['a.x.com'], upstream: 'http://rail-abc-1:3000' });
+  const j = JSON.parse(fs.readFileSync(path.join(d, 'abc.yml'), 'utf8'));
+  assert.deepEqual(j.http.routers['rail-abc'].entryPoints, ['web']);
+  assert.equal(j.http.routers['rail-abc'].tls, undefined, 'c\'est le proxy de devant qui fait le HTTPS');
+  assert.equal(j.http.services['rail-abc'].loadBalancer.servers[0].url, 'http://rail-abc-1:3000');
+});

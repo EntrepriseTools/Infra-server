@@ -539,7 +539,7 @@ function domainsTab(body, s) {
   const host = h('input', { placeholder: 'api.mondomaine.com', style: 'flex:1' });
   body.append(h('div', { class: 'card' },
     h('table', {}, h('tbody', {}, s.domains.map((d) => h('tr', {},
-      h('td', {}, h('a', { href: `https://${d.hostname}`, target: '_blank', rel: 'noopener' }, d.hostname)),
+      h('td', {}, h('a', { href: d.url || `https://${d.hostname}`, target: '_blank', rel: 'noopener' }, d.hostname)),
       h('td', { class: 'mut' }, d.kind === 'auto' ? 'fourni' : 'personnalisé'),
       h('td', { class: 'actions' }, h('button', { class: 'sm dng', onclick: act(async () => { await api('DELETE', `/services/${s.id}/domains/${d.id}`); render(); }) }, 'Retirer')))))),
     h('div', { class: 'row', style: 'margin-top:12px' }, host,

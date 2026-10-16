@@ -39,13 +39,13 @@ export function createApp({ config, store, deployer, runtime, logs, github, moni
     return dep?.container || null;
   };
   const publicService = (s) => {
-    const domains = store.listDomains(s.id);
+    const domains = store.listDomains(s.id).map((d) => ({ ...d, url: config.urlFor(d.hostname) }));
     const project = store.getProject(s.project_id);
     return {
       ...s,
       project_name: project?.name ?? null,
       domains,
-      url: s.kind === 'database' ? null : (domains[0] ? `https://${domains[0].hostname}` : null),
+      url: s.kind === 'database' ? null : (domains[0] ? domains[0].url : null),
       private_host: project ? `${s.name}.${project.name}.internal` : null,
       volume: s.volume_path ? { name: volumeName(s.id), path: s.volume_path } : null,
       active_deployment: s.active_deployment_id ? store.getDeployment(s.active_deployment_id) : null,
@@ -60,6 +60,7 @@ export function createApp({ config, store, deployer, runtime, logs, github, moni
   r.add('GET', '/api/config', () => ok({
     domain: config.domain, publicUrl: config.publicUrl, dashboardHost: config.dashboardHost,
     version: config.version, engines: engineList(), alerts: !!config.notifyUrl,
+    tls: config.tlsMode, site_scheme: config.siteScheme, site_port: config.sitePort,
   }));
 
   // ── vue d'ensemble : un seul appel pour la page d'accueil ──
@@ -417,7 +418,8 @@ export function createApp({ config, store, deployer, runtime, logs, github, moni
     if (s.kind === 'database') throw new HttpError(400, 'une base de données ne s\'expose pas sur Internet');
     const host = v.hostname(body.hostname);
     if (host === config.dashboardHost) throw new HttpError(400, 'ce nom est réservé au tableau de bord');
-    return ok(store.addDomain(params.id, host, host.endsWith(`.${config.domain}`) ? 'auto' : 'custom'), 201);
+    const d = store.addDomain(params.id, host, host.endsWith(`.${config.domain}`) ? 'auto' : 'custom');
+    return ok({ ...d, url: config.urlFor(d.hostname) }, 201);
   });
   r.add('DELETE', '/api/services/:id/domains/:domainId', ({ params }) => {
     svcOr404(params.id);

@@ -71,7 +71,7 @@ et un domaine dont vous gérez le DNS.
 
 1. **DNS** — deux enregistrements vers l'IP du serveur :
    `*.apps.exemple.com` (les services) et `rail.apps.exemple.com` (le tableau de bord ; couvert par le joker).
-2. **Installation** :
+2. **Installation** (déroulé complet, pas à pas, sur le serveur : **[DEPLOIEMENT.md](DEPLOIEMENT.md)**) :
    ```bash
    git clone https://github.com/EntrepriseTools/Infra-server && cd Infra-server/paas
    sudo ./install.sh          # demande le domaine et le courriel Let's Encrypt, fabrique .env, lance tout
@@ -80,9 +80,35 @@ et un domaine dont vous gérez le DNS.
    **Sauvegardez `.env`** : sans `RAIL_SECRET_KEY`, les variables chiffrées sont perdues.
 3. Ouvrez `https://rail.apps.exemple.com`, entrez le jeton.
 
-> **Ce serveur fait déjà tourner nginx sur le 80/443** (voie `infra`, voir le README à la racine) ?
-> Rail refuse alors de s'installer, pour ne rien casser. Donnez-lui une IP à lui (`RAIL_BIND=<ip>` dans `.env`, et
-> nginx doit n'écouter que l'autre IP), ou un autre serveur.
+### Les ports 80 et 443 sont déjà pris ?
+
+C'est le cas si le serveur fait déjà tourner nginx (voie `infra`, voir le README à la racine). Rail ne force rien :
+il s'arrête et propose trois chemins, selon qui doit faire le HTTPS.
+
+| Mode | Qui fait le HTTPS | Ports pris par Rail | Quand |
+|---|---|---|---|
+| `acme` (défaut) | Rail, Let's Encrypt par défi HTTP-01 | **80 et 443** obligatoirement | le serveur est à lui |
+| `proxy` | votre nginx, devant | un seul port en clair (ex. **8080**) | nginx reste maître du 80/443 |
+| `dns` | Rail, Let's Encrypt par défi DNS-01 | ceux que vous voulez (ex. 8080/8443) | pas de proxy devant, mais le 80 n'est pas libre |
+
+```bash
+# nginx garde le 443 et transmet à Rail (le script affiche le bloc nginx à copier)
+sudo RAIL_TLS=proxy RAIL_HTTP_PORT=8080 ./install.sh
+
+# des ports à soi, certificat obtenu par le DNS (identifiants dans paas/.env.dns)
+sudo RAIL_TLS=dns RAIL_HTTP_PORT=8080 RAIL_HTTPS_PORT=8443 RAIL_ACME_DNS_PROVIDER=cloudflare ./install.sh
+
+# ou une IP rien qu'à lui, sur les ports standards
+sudo RAIL_BIND=203.0.113.10 ./install.sh
+```
+
+Le défi **HTTP-01 exige le port 80 public** : c'est pourquoi des ports exotiques imposent `proxy` ou `dns`.
+En mode `proxy`, Rail n'écoute qu'en clair sur `127.0.0.1`-ou-l'IP choisie, ne demande aucun certificat, et les
+adresses affichées restent celles que votre nginx publie (`RAIL_SITE_SCHEME`, `RAIL_SITE_PORT` si besoin).
+Votre nginx doit transmettre `Host`, `X-Forwarded-Proto`, et laisser passer les réponses longues (journaux en direct).
+
+Toute la configuration statique de Traefik est **engendrée par `install.sh`** dans `paas/traefik.local.yml`
+(d'après `traefik.exemple.yml`) : on peut la lire, et elle est réécrite à chaque passage du script.
 
 **Mise à jour** : `git pull && sudo ./install.sh`. Le catalogue SQLite se met à niveau tout seul au
 démarrage (migrations numérotées) ; vos conteneurs ne sont pas touchés.
@@ -353,6 +379,9 @@ rail status                          # le serveur et les services, depuis n'impo
 | 404 sur l'adresse du service | aucun déploiement réussi, service **arrêté**, ou domaine ajouté sans *Redéployer* |
 | Service « dégradé » | le conteneur tourne mais le chemin de santé ne répond plus en 2xx/3xx : regarder les logs d'exécution |
 | Certificat invalide | le DNS ne pointe pas encore sur le serveur ; `docker compose logs traefik` (Let's Encrypt limite les essais) |
+| « le port 80 est déjà utilisé » | un serveur web tient déjà la machine : voir [Les ports 80 et 443 sont déjà pris ?](#les-ports-80-et-443-sont-déjà-pris) |
+| En mode `proxy`, 404 ou boucle de redirection | nginx ne transmet pas l'en-tête `Host`, ou vise le mauvais port (`RAIL_HTTP_PORT`) |
+| En mode `dns`, pas de certificat | identifiants du fournisseur absents de `paas/.env.dns`, ou `RAIL_ACME_DNS_PROVIDER` faux ; `docker compose logs traefik` |
 | Webhook en échec (401) | secret différent de celui du service : l'afficher dans *Réglages* |
 | `permission denied` sur docker.sock | `DOCKER_GID` de `.env` ≠ groupe du socket : relancer `install.sh` |
 | « référence non résolue » dans un journal | le service visé n'existe pas dans **ce** projet, ou la clé n'existe pas : voir l'onglet *Connexion* de la base |
@@ -392,5 +421,6 @@ paas/
 ├─ test/         unitaires, déploiement, bases de données, surveillance, API/CLI, et integration.sh (vrai Docker)
 ├─ compose.yaml  Traefik + plan de contrôle        Dockerfile    image du plan de contrôle
 ├─ install.sh    installation idempotente          sauvegarde.sh archive complète
-└─ .env.example  toute la configuration
+├─ traefik.exemple.yml  modèle de la configuration statique (install.sh engendre traefik.local.yml)
+└─ .env.example  toute la configuration            DEPLOIEMENT.md  le déroulé, pas à pas, sur le serveur
 ```

@@ -1,0 +1,37 @@
+# Configuration statique de Traefik — modèle.
+# install.sh en engendre une copie adaptée à vos réglages dans « traefik.local.yml »
+# (c'est ce fichier-là que Compose monte). Ne modifiez pas celui-ci : il sert de référence.
+#
+# Les adresses ci-dessous sont celles de l'INTÉRIEUR du conteneur : les ports publiés
+# sur la machine (RAIL_HTTP_PORT / RAIL_HTTPS_PORT) sont réglés dans compose.yaml.
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+accessLog: {}
+log:
+  level: INFO
+
+entryPoints:
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+
+providers:
+  file:
+    # Les routes sont des fichiers que le plan de contrôle écrit. Traefik n'a PAS le socket docker.
+    directory: /data/traefik/dynamic
+    watch: true
+
+certificatesResolvers:
+  le:
+    acme:
+      email: vous@exemple.com
+      storage: /letsencrypt/acme.json
+      httpChallenge:
+        entryPoint: web

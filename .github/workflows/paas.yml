@@ -52,7 +52,12 @@ jobs:
         working-directory: paas
         run: |
           sed -e 's|^DOCKER_GID=.*|DOCKER_GID=999|' .env.example > .env
+          cp traefik.exemple.yml traefik.local.yml   # engendré par install.sh sur une vraie machine
+          : > .env.dns
           docker compose config --quiet
+          # Les ports sont réglables : derrière un nginx, Rail n'expose que son port HTTP.
+          RAIL_TLS=proxy RAIL_HTTP_PORT=8080 RAIL_BIND_TLS=127.0.0.1 RAIL_HTTPS_PORT=8443 \
+            docker compose config | grep -q 'published: "8080"'
       - name: L'image du plan de contrôle se construit
         working-directory: paas
         run: docker build -t rail-control:ci .

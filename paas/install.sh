@@ -5,6 +5,10 @@
 #   sudo ./install.sh                         interactif : domaine et courriel demandés
 #   sudo RAIL_DOMAIN=apps.exemple.com RAIL_ACME_EMAIL=moi@exemple.com ./install.sh
 #
+# Les ports 80 et 443 sont déjà pris (nginx…) ? Rail s'installe à côté :
+#   sudo RAIL_TLS=proxy RAIL_HTTP_PORT=8080 ./install.sh      nginx garde le HTTPS, Rail est derrière
+#   sudo RAIL_TLS=dns RAIL_HTTP_PORT=8080 RAIL_HTTPS_PORT=8443 ./install.sh   certificat par DNS-01
+#
 # Idempotent : relancé, il garde le .env existant et remet à jour les conteneurs.
 # =====================================================================
 set -euo pipefail
@@ -16,11 +20,53 @@ command -v docker >/dev/null || die "Docker n'est pas installé. Installez Docke
 docker compose version >/dev/null 2>&1 || die "le plugin « docker compose » (v2) est requis"
 command -v openssl >/dev/null || die "openssl est requis"
 
-# Les ports 80 et 443 doivent être libres : Traefik les prend (certificats HTTP-01 sur le 80).
+# ── Mode TLS et ports : ce que Rail va publier sur la machine ────────────
+lire_env() { [ -f .env ] && sed -n "s/^$1=//p" .env | tail -1; }
+mode="${RAIL_TLS:-$(lire_env RAIL_TLS)}"; mode="${mode:-acme}"
+http_port="${RAIL_HTTP_PORT:-$(lire_env RAIL_HTTP_PORT)}"; http_port="${http_port:-80}"
+https_port="${RAIL_HTTPS_PORT:-$(lire_env RAIL_HTTPS_PORT)}"; https_port="${https_port:-443}"
+dns_provider="${RAIL_ACME_DNS_PROVIDER:-$(lire_env RAIL_ACME_DNS_PROVIDER)}"
+case "$mode" in
+  acme|dns|proxy) ;;
+  *) die "RAIL_TLS doit valoir acme, dns ou proxy (reçu : $mode)" ;;
+esac
+# En mode proxy, le 443 ne sort pas de la machine : c'est le serveur de devant qui l'a.
+if [ "$mode" = proxy ]; then
+  [ "$https_port" = 443 ] && https_port=8443
+  bind_tls=127.0.0.1
+else
+  bind_tls="${RAIL_BIND_TLS:-$(lire_env RAIL_BIND_TLS)}"
+fi
+[ "$mode" = dns ] && [ -z "$dns_provider" ] && die "RAIL_TLS=dns demande RAIL_ACME_DNS_PROVIDER (cloudflare, ovh…) et ses identifiants dans .env.dns"
+
+# Les ports que Rail va prendre doivent être libres.
 busy() { ss -ltnH "( sport = :$1 )" 2>/dev/null | grep -q . ; }
 if ! docker ps --format '{{.Names}}' | grep -q '^rail-traefik'; then
-  for p in 80 443; do
-    busy "$p" && die "le port $p est déjà utilisé (nginx/apache de l'hôte ?). Rail veut le 80 et le 443 : libérez-les, ou donnez-lui une IP à lui (RAIL_BIND dans .env)."
+  a_tester="$http_port"
+  [ "$mode" != proxy ] && a_tester="$http_port $https_port"
+  for p in $a_tester; do
+    if busy "$p"; then
+      printf 'install : le port %s est déjà utilisé sur cette machine.\n\n' "$p" >&2
+      if [ "$mode" = acme ]; then
+        cat >&2 <<'AIDE'
+Trois façons de s'en sortir :
+
+  1. Libérer le 80 et le 443 (si nginx ne sert plus) :
+       systemctl disable --now nginx
+
+  2. Laisser le serveur de devant faire le HTTPS, et mettre Rail derrière :
+       sudo RAIL_TLS=proxy RAIL_HTTP_PORT=8080 ./install.sh
+     (ce script affichera le bloc nginx à copier)
+
+  3. Donner à Rail des ports à lui, avec un certificat par DNS-01 :
+       sudo RAIL_TLS=dns RAIL_HTTP_PORT=8080 RAIL_HTTPS_PORT=8443 \
+            RAIL_ACME_DNS_PROVIDER=cloudflare ./install.sh
+
+Ou lui donner une IP à lui : RAIL_BIND=<ip> dans .env.
+AIDE
+      fi
+      exit 1
+    fi
   done
 fi
 
@@ -40,6 +86,63 @@ if [ ! -f .env ]; then
 fi
 chmod 600 .env
 
+# Les réglages de ports et de TLS sont réécrits à chaque passage : ce sont eux qui
+# décident de la configuration de Traefik juste en dessous.
+poser() {
+  if grep -q "^$1=" .env; then sed -i "s|^$1=.*|$1=$2|" .env; else printf '%s=%s\n' "$1" "$2" >> .env; fi
+}
+poser RAIL_TLS "$mode"
+poser RAIL_HTTP_PORT "$http_port"
+poser RAIL_HTTPS_PORT "$https_port"
+[ -n "${bind_tls:-}" ] && poser RAIL_BIND_TLS "$bind_tls"
+[ -n "${dns_provider:-}" ] && poser RAIL_ACME_DNS_PROVIDER "$dns_provider"
+if [ "$mode" = proxy ]; then poser RAIL_SITE_SCHEME "${RAIL_SITE_SCHEME:-https}"; poser RAIL_SITE_PORT "${RAIL_SITE_PORT:-443}"; fi
+
+# Identifiants du fournisseur DNS (mode dns) : un fichier à part, jamais le .env de Rail.
+if [ ! -f .env.dns ]; then
+  umask 077
+  printf '# Identifiants du fournisseur DNS pour RAIL_TLS=dns. Exemple Cloudflare :\n# CF_DNS_API_TOKEN=...\n' > .env.dns
+fi
+chmod 600 .env.dns
+
+# ── Configuration statique de Traefik, engendrée d'après le mode ─────────
+email_acme="$(sed -n 's/^RAIL_ACME_EMAIL=//p' .env | tail -1)"
+{
+  printf '# Engendré par install.sh — mode TLS : %s. Ne pas éditer : il sera réécrit.\n' "$mode"
+  cat <<'TETE'
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+accessLog: {}
+log:
+  level: INFO
+entryPoints:
+TETE
+  if [ "$mode" = proxy ]; then
+    printf '  web:\n    address: ":80"\n'
+  else
+    printf '  web:\n    address: ":80"\n    http:\n      redirections:\n        entryPoint:\n          to: websecure\n          scheme: https\n'
+    [ "$https_port" != 443 ] && printf '          port: "%s"\n' "$https_port"
+    printf '  websecure:\n    address: ":443"\n'
+  fi
+  cat <<'PROV'
+providers:
+  file:
+    # Les routes sont des fichiers que le plan de contrôle écrit : Traefik n'a PAS le socket docker.
+    directory: /data/traefik/dynamic
+    watch: true
+PROV
+  if [ "$mode" != proxy ]; then
+    printf 'certificatesResolvers:\n  le:\n    acme:\n      email: %s\n      storage: /letsencrypt/acme.json\n' "$email_acme"
+    if [ "$mode" = dns ]; then
+      printf '      dnsChallenge:\n        provider: %s\n' "$dns_provider"
+    else
+      printf '      httpChallenge:\n        entryPoint: web\n'
+    fi
+  fi
+} > traefik.local.yml
+chmod 644 traefik.local.yml
+
 gid="$(getent group docker | cut -d: -f3 || true)"
 [ -n "$gid" ] || die "le groupe « docker » n'existe pas sur cet hôte"
 if grep -q '^DOCKER_GID=' .env; then sed -i "s|^DOCKER_GID=.*|DOCKER_GID=$gid|" .env; else echo "DOCKER_GID=$gid" >> .env; fi
@@ -56,11 +159,46 @@ echo
 
 domain="$(sed -n 's/^RAIL_DOMAIN=//p' .env)"
 dash="$(sed -n 's/^RAIL_DASHBOARD_HOST=//p' .env)"; dash="${dash:-rail.$domain}"
+# L'adresse publique dépend du mode : port sous-entendu quand c'est celui du schéma.
+suffixe=""
+case "$mode" in
+  proxy) url="https://$dash" ;;
+  *) [ "$https_port" != 443 ] && suffixe=":$https_port"; url="https://$dash$suffixe" ;;
+esac
 echo
 echo "Rail est installé."
-echo "  Tableau de bord : https://$dash   (le certificat arrive en quelques secondes si le DNS est en place)"
+case "$mode" in
+  acme) echo "  Mode TLS        : Let's Encrypt (HTTP-01), Rail tient les ports $http_port et $https_port" ;;
+  dns)  echo "  Mode TLS        : Let's Encrypt (DNS-01, $dns_provider) — identifiants à mettre dans .env.dns puis « docker compose up -d »" ;;
+  proxy) echo "  Mode TLS        : aucun ici — Rail écoute en clair sur le port $http_port, le HTTPS est à votre serveur de devant" ;;
+esac
+echo "  Tableau de bord : $url   (le certificat arrive en quelques secondes si le DNS est en place)"
 echo "  Jeton           : $(sed -n 's/^RAIL_ADMIN_TOKEN=//p' .env)"
 echo "  DNS requis      : *.${domain}  et  ${dash}  →  l'adresse IP de ce serveur"
+if [ "$mode" = proxy ]; then
+  cat <<NGINX
+
+  À copier dans votre nginx (un bloc pour le tableau de bord, un pour les services) :
+
+    server {
+      listen 443 ssl;
+      server_name ${dash} *.${domain};
+      # ssl_certificate … (vos certificats, par exemple ceux de certbot)
+      location / {
+        proxy_pass http://127.0.0.1:${http_port};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_read_timeout 1h;   # les journaux en direct sont des réponses longues
+      }
+    }
+
+  (un certificat joker « *.${domain} » évite d'en demander un par service)
+NGINX
+fi
 echo
 echo "  Déployer         : tableau de bord → Nouveau projet → + Service (dépôt GitHub)"
 echo "  Base de données  : + Base de données (PostgreSQL, MySQL, Redis, MongoDB), branchée par \${{nom.DATABASE_URL}}"

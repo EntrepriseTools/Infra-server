@@ -31,8 +31,10 @@ chaque étape ([migration](docs/plateforme/09-migration.md)).
 > bascule le trafic sans coupure (HTTPS automatique) et permet le retour arrière en un clic. On y ajoute des
 > **bases managées** (PostgreSQL, MySQL, Redis, MongoDB) avec volume persistant, console SQL et sauvegarde, et on
 > **surveille** le tout — processeur, mémoire, réseau, disponibilité, fil d'activité, alertes, et même les conteneurs
-> que Rail n'a pas déployés — depuis un tableau de bord, la CLI `rail` ou l'API. Indépendante des deux voies ci-dessus
-> (elle veut les ports 80/443 pour elle).
+> que Rail n'a pas déployés — depuis un tableau de bord, la CLI `rail` ou l'API. Indépendante des deux voies ci-dessus :
+> elle prend les ports 80/443 si la machine est à elle, sinon elle se met derrière le nginx existant
+> (`RAIL_TLS=proxy`) ou prend des ports à elle (`RAIL_TLS=dns`).
+> Déploiement pas à pas sur le serveur : **[paas/DEPLOIEMENT.md](paas/DEPLOIEMENT.md)**.
 
 ---
 

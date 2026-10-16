@@ -24,11 +24,41 @@ export function loadConfig(env = process.env) {
   const dataDir = path.resolve(env.RAIL_DATA_DIR || '/data');
   const port = int(env.RAIL_PORT, 4000);
   const dashboardHost = (env.RAIL_DASHBOARD_HOST || `rail.${domain}`).toLowerCase();
+
+  // ── Par où le monde entre ──────────────────────────────────────────────
+  // acme  : Rail tient le 80 et le 443, certificats Let's Encrypt (défi HTTP-01).
+  // dns   : Rail peut être sur d'autres ports ; le certificat s'obtient par DNS-01.
+  // proxy : un serveur devant (nginx…) fait le HTTPS et transmet à Rail, en clair.
+  const tlsMode = env.RAIL_TLS || 'acme';
+  if (!['acme', 'dns', 'proxy'].includes(tlsMode)) throw new Error('RAIL_TLS doit valoir acme, dns ou proxy');
+  const httpPort = int(env.RAIL_HTTP_PORT, 80);
+  const httpsPort = int(env.RAIL_HTTPS_PORT, 443);
+  for (const [k, v] of [['RAIL_HTTP_PORT', httpPort], ['RAIL_HTTPS_PORT', httpsPort]]) {
+    if (!Number.isInteger(v) || v < 1 || v > 65535) throw new Error(`${k} doit être un port valide`);
+  }
+  // En mode « proxy », l'adresse publique est celle du serveur de devant, pas la nôtre.
+  const siteScheme = env.RAIL_SITE_SCHEME || (tlsMode === 'proxy' ? 'https' : 'https');
+  if (!['http', 'https'].includes(siteScheme)) throw new Error('RAIL_SITE_SCHEME doit valoir http ou https');
+  const sitePort = int(env.RAIL_SITE_PORT, tlsMode === 'proxy' ? (siteScheme === 'https' ? 443 : 80) : httpsPort);
+  /** L'adresse publique d'un nom d'hôte, port sous-entendu quand il est celui du schéma. */
+  const urlFor = (host) => {
+    const defaut = siteScheme === 'https' ? 443 : 80;
+    return `${siteScheme}://${host}${sitePort === defaut ? '' : `:${sitePort}`}`;
+  };
   return {
+    tlsMode,
+    httpPort,
+    httpsPort,
+    siteScheme,
+    sitePort,
+    urlFor,
+    // L'entrée Traefik et le résolveur que les fichiers de route doivent viser.
+    entryPoint: tlsMode === 'proxy' ? 'web' : 'websecure',
+    certResolver: tlsMode === 'proxy' ? null : 'le',
     version: PKG.version,
     domain,
     dashboardHost,
-    publicUrl: env.RAIL_PUBLIC_URL || `https://${dashboardHost}`,
+    publicUrl: env.RAIL_PUBLIC_URL || urlFor(dashboardHost),
     controlUpstream: env.RAIL_CONTROL_UPSTREAM || `http://rail-control:${port}`,
     port,
     dataDir,

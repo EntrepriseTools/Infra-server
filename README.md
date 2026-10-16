@@ -28,8 +28,11 @@ chaque étape ([migration](docs/plateforme/09-migration.md)).
 
 > **Et une troisième brique : [Rail](paas/LISEZMOI.md)** — un « Railway » auto-hébergé pour déployer
 > *n'importe quelle API* depuis GitHub : on relie un dépôt, chaque `git push` construit, vérifie la santé,
-> bascule le trafic sans coupure (HTTPS automatique) et permet le retour arrière en un clic. Tableau de bord,
-> CLI et API. Indépendante des deux voies ci-dessus (elle veut les ports 80/443 pour elle).
+> bascule le trafic sans coupure (HTTPS automatique) et permet le retour arrière en un clic. On y ajoute des
+> **bases managées** (PostgreSQL, MySQL, Redis, MongoDB) avec volume persistant, console SQL et sauvegarde, et on
+> **surveille** le tout — processeur, mémoire, réseau, disponibilité, fil d'activité, alertes, et même les conteneurs
+> que Rail n'a pas déployés — depuis un tableau de bord, la CLI `rail` ou l'API. Indépendante des deux voies ci-dessus
+> (elle veut les ports 80/443 pour elle).
 
 ---
 

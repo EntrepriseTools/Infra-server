@@ -64,3 +64,33 @@ export function envValue(v) {
   if (typeof v !== 'string' || v.length > 32768 || v.includes('\0')) bad('valeur de variable invalide');
   return v;
 }
+
+// Une valeur prise dans une liste fermée (moteur de base, état voulu…).
+export function oneOf(v, list, what) {
+  if (!list.includes(v)) bad(`${what} invalide : attendu ${list.join(', ')}`);
+  return v;
+}
+// Point de montage d'un volume : chemin absolu, sans « .. », hors des dossiers de l'hôte qui comptent.
+export function absPath(v, what = 'chemin') {
+  if (typeof v !== 'string' || !/^\/[A-Za-z0-9_.\/-]{1,200}$/.test(v) || v.split('/').includes('..') || v.endsWith('/')) bad(`${what} invalide : chemin absolu (ex. /data)`);
+  return v;
+}
+// Fenêtre de mesures : « 1h », « 6h », « 24h », « 7d » → secondes.
+const WINDOWS = { '15m': 900, '1h': 3600, '6h': 21600, '24h': 86400, '7d': 604800 };
+export const WINDOW_NAMES = Object.keys(WINDOWS);
+export function windowSeconds(v, dflt = '1h') {
+  const k = v || dflt;
+  if (!(k in WINDOWS)) bad(`fenêtre invalide : attendu ${WINDOW_NAMES.join(', ')}`);
+  return WINDOWS[k];
+}
+// Référence d'image Docker : « postgres:16-alpine », « ghcr.io/org/img@sha256:… ».
+export function image(v) {
+  if (typeof v !== 'string' || !/^[a-z0-9][a-z0-9._/-]{0,120}(:[A-Za-z0-9._-]{1,64})?(@sha256:[a-f0-9]{64})?$/.test(v)) bad('image invalide (ex. postgres:16-alpine)');
+  return v;
+}
+
+// Nom (ou identifiant) d'un conteneur Docker : ce que `docker ps` affiche.
+export function containerName(v) {
+  if (typeof v !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/.test(v)) bad('nom de conteneur invalide');
+  return v;
+}

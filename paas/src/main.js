@@ -5,6 +5,8 @@ import { LogHub } from './logs.js';
 import { DockerRuntime } from './runtime.js';
 import { Routes } from './routes.js';
 import { GithubApi } from './github.js';
+import { Notifier } from './notify.js';
+import { Monitor } from './monitor.js';
 import { Deployer } from './deployer.js';
 import { createApp } from './api.js';
 
@@ -18,16 +20,20 @@ const logs = new LogHub(config.logsDir);
 const runtime = new DockerRuntime({ network: config.network });
 const routes = new Routes(config.routesDir);
 const github = new GithubApi({ apiBase: config.githubApi });
-const deployer = new Deployer({ store, runtime, routes, logs, github, config });
+const notifier = new Notifier({ url: config.notifyUrl, onError: (e) => console.warn('[alerte]', e.message) });
+const deployer = new Deployer({ store, runtime, routes, logs, github, config, notifier });
+const monitor = new Monitor({ store, runtime, config, notifier, deployer });
 
 await runtime.ensureNetwork();
 // La route du tableau de bord appartient au plan de contrôle : elle se réécrit à chaque démarrage.
 routes.set('core', { hosts: [config.dashboardHost], upstream: config.controlUpstream });
 await deployer.reconcile();
+monitor.start();
+store.addEvent({ kind: 'system.start', level: 'info', message: `plan de contrôle démarré (version ${config.version})` });
 
-const server = createApp({ config, store, deployer, runtime, logs, github });
-server.listen(config.port, () => console.log(`[rail] plan de contrôle sur :${config.port} — tableau de bord https://${config.dashboardHost}`));
+const server = createApp({ config, store, deployer, runtime, logs, github, monitor, notifier });
+server.listen(config.port, () => console.log(`[rail] v${config.version} — plan de contrôle sur :${config.port} — tableau de bord https://${config.dashboardHost}`));
 
-const stop = () => { server.close(); setTimeout(() => process.exit(0), 200); };
+const stop = () => { monitor.stop(); server.close(); setTimeout(() => process.exit(0), 200); };
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);

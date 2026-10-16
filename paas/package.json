@@ -1,13 +1,18 @@
 {
   "name": "rail-paas",
-  "version": "1.0.0",
-  "description": "Un mini-Railway auto-hébergé : déployer des API depuis GitHub sur son propre serveur.",
+  "version": "2.0.0",
+  "description": "Un mini-Railway auto-hébergé : déployer, surveiller et exploiter des API et des bases depuis GitHub.",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=22.13" },
-  "bin": { "rail": "bin/rail.js" },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "bin": {
+    "rail": "bin/rail.js"
+  },
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.js",
-    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\""
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.js\"",
+    "check": "node --check web/app.js && node --check web/ui.js"
   }
 }

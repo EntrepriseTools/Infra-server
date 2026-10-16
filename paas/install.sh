@@ -61,5 +61,12 @@ echo "Rail est installé."
 echo "  Tableau de bord : https://$dash   (le certificat arrive en quelques secondes si le DNS est en place)"
 echo "  Jeton           : $(sed -n 's/^RAIL_ADMIN_TOKEN=//p' .env)"
 echo "  DNS requis      : *.${domain}  et  ${dash}  →  l'adresse IP de ce serveur"
-[ "${created:-0}" = 1 ] && echo "  Sauvegardez .env (surtout RAIL_SECRET_KEY) : sans elle, les variables chiffrées sont perdues."
+echo
+echo "  Déployer         : tableau de bord → Nouveau projet → + Service (dépôt GitHub)"
+echo "  Base de données  : + Base de données (PostgreSQL, MySQL, Redis, MongoDB), branchée par \${{nom.DATABASE_URL}}"
+echo "  Requêter         : onglet Requêtes d'une base (SQL, lecture seule par défaut) ou « rail sql projet/base \"SELECT 1\" »"
+echo "  Surveiller       : onglet Aperçu d'un service, page Conteneurs (tout ce que Docker fait tourner ici) et page Système"
+echo "  Alertes          : renseignez RAIL_NOTIFY_URL dans .env (Slack, Discord ou votre webhook), puis relancez ce script"
+echo "  Sauvegarde       : sudo ./sauvegarde.sh    (à mettre en cron : 15 3 * * *  cd $PWD && ./sauvegarde.sh)"
+[ "${created:-0}" = 1 ] && echo "  Gardez .env ailleurs (surtout RAIL_SECRET_KEY) : sans elle, les variables chiffrées sont perdues."
 exit 0

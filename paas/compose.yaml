@@ -28,6 +28,9 @@ services:
       - traefik-acme:/letsencrypt
     networks: [rail]
     security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     # Le dossier des routes doit exister avant que Traefik ne le surveille.
     depends_on:
       control: { condition: service_healthy }
@@ -48,6 +51,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     networks: [rail]
     security_opt: ["no-new-privileges:true"]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   rail-data:

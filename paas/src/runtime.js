@@ -78,11 +78,12 @@ export class DockerRuntime {
    * Démarre un conteneur durci. Les variables passent par l'environnement du client
    * (`-e CLE` sans valeur) : jamais dans la liste d'arguments, donc jamais dans `ps`.
    */
-  async start({ name, image, env, labels = {}, memoryMb, cpus, alias, volumes = [], cmd = null, logMaxSizeMb = 10, logMaxFiles = 3 }) {
+  async start({ name, image, env, labels = {}, memoryMb, cpus, alias, volumes = [], cmd = null, caps = [], logMaxSizeMb = 10, logMaxFiles = 3 }) {
     const args = ['run', '-d', '--name', name, '--network', this.network, '--restart', 'unless-stopped',
       '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE',
       '--pids-limit', '512', '--add-host', 'host.docker.internal:host-gateway',
       '--log-opt', `max-size=${logMaxSizeMb}m`, '--log-opt', `max-file=${logMaxFiles}`];
+    for (const c of caps) args.push('--cap-add', c);
     if (alias) args.push('--network-alias', alias);
     if (memoryMb) args.push('--memory', `${memoryMb}m`);
     if (cpus) args.push('--cpus', String(cpus));

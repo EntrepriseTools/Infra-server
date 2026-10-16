@@ -37,6 +37,7 @@ test('déploiement nominal : clone → build → démarre → sain → route →
   assert.equal(env_.PORT, '3000'); assert.equal(env_.RAIL_GIT_COMMIT_SHA, repo.first);
   assert.equal(env_.RAIL_PUBLIC_DOMAIN, 'api-demo.apps.test.dev');
   assert.equal(e.runtime.last.alias, 'api.demo.internal');
+  assert.deepEqual(e.runtime.last.caps, [], 'un service ordinaire n\'a aucune capacité en plus');
   assert.match(e.logs.read(dep.id), /construction automatique \(node\)/);
   assert.deepEqual(e.statuses.map((s) => s.state), ['pending', 'success']);
   assert.ok(!fs.existsSync(path.join(e.config.buildsDir, dep.id)), 'le dossier de build est nettoyé');

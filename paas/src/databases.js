@@ -8,6 +8,15 @@
 // autres services (`${{ma-base.DATABASE_URL}}`).
 import { randomToken } from './crypto.js';
 
+/**
+ * Les images officielles démarrent en root, préparent leur dossier de données
+ * (chown/chmod sur le volume), puis redescendent vers leur propre utilisateur
+ * (gosu, su-exec). Sans ces capacités, elles s'arrêtent sur « operation not
+ * permitted ». C'est le strict nécessaire : tout le reste reste retiré, et
+ * `no-new-privileges` tient toujours.
+ */
+export const DB_CAPS = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID'];
+
 /** Mot de passe sûr dans une URL : base64url ne contient que [A-Za-z0-9_-]. */
 const password = () => randomToken(18);
 /** « mon-api » → « mon_api » : un nom de base acceptable partout. */

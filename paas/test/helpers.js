@@ -35,9 +35,9 @@ export class FakeRuntime {
   async imageExists(t) { return this.images.has(t); }
   async removeImage(t) { this.#n(`rmi ${t}`); this.images.delete(t); }
   async pruneImages() { this.#n('prune'); return 'Total reclaimed space: 0B'; }
-  async start({ name, image, env, labels, alias, memoryMb, volumes = [], cmd = null }) {
+  async start({ name, image, env, labels, alias, memoryMb, volumes = [], cmd = null, caps = [] }) {
     this.#n(`start ${name}`);
-    this.env[name] = env; this.last = { name, image, labels, alias, memoryMb, volumes, cmd };
+    this.env[name] = env; this.last = { name, image, labels, alias, memoryMb, volumes, cmd, caps };
     for (const v of volumes) this.volumes.add(v.name);
     this.containers.set(name, this.crashOnStart ? 'exited' : 'running');
     return 'cid';

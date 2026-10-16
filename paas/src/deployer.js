@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fetchSource } from './source.js';
 import { detectBuild, materialize } from './detect.js';
-import { engineCmd } from './databases.js';
+import { engineCmd, DB_CAPS } from './databases.js';
 import { resolveRefs } from './vars.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -276,6 +276,7 @@ export class Deployer {
         alias: `${svc.name}.${project.name}.internal`,
         volumes: svc.volume_path ? [{ name: volumeName(svc.id), path: svc.volume_path }] : [],
         cmd: isDb ? engineCmd(svc.engine, env) : null,
+        caps: isDb ? DB_CAPS : [],
         logMaxSizeMb: this.config.logMaxSizeMb, logMaxFiles: this.config.logMaxFiles,
       });
       this.store.updateDeployment(depId, { container });

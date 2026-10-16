@@ -47,6 +47,8 @@ test('base de données : créée, démarrée avec son volume, jamais exposée su
   assert.ok(e.runtime.pulled.includes('postgres:16-alpine'), 'l\'image officielle est récupérée');
   assert.equal(e.runtime.calls.filter((c) => c.startsWith('build')).length, 0, 'rien à construire');
   assert.deepEqual(e.runtime.last.volumes, [{ name: volumeName(db.id), path: '/var/lib/postgresql/data' }]);
+  // L'image officielle prépare son volume en root puis redescend : sans ces capacités, elle s'arrête.
+  assert.deepEqual(e.runtime.last.caps, ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID']);
   assert.equal(e.runtime.last.alias, 'base.demo.internal');
   assert.ok(!fs.existsSync(routeFile(e, db.id)), 'aucune route Traefik vers une base');
   const env_ = e.runtime.env[after.active_deployment.container];

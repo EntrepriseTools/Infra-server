@@ -13,7 +13,11 @@ function writeAtomic(file, content) {
 }
 
 export class Routes {
-  constructor(dir) { this.dir = dir; fs.mkdirSync(dir, { recursive: true }); }
+  /** @param opts.entryPoint entrée Traefik visée ; opts.certResolver null quand un proxy fait le TLS. */
+  constructor(dir, { entryPoint = 'websecure', certResolver = 'le' } = {}) {
+    this.dir = dir; this.entryPoint = entryPoint; this.certResolver = certResolver;
+    fs.mkdirSync(dir, { recursive: true });
+  }
   #file(key) { return path.join(this.dir, `${key}.yml`); }
 
   // JSON est du YAML valide : pas de sérialiseur YAML à maintenir, pas d'échappement à rater.
@@ -22,7 +26,12 @@ export class Routes {
     const name = `rail-${key}`;
     writeAtomic(this.#file(key), JSON.stringify({
       http: {
-        routers: { [name]: { rule: rule(hosts), entryPoints: ['websecure'], service: name, tls: { certResolver: 'le' } } },
+        routers: {
+          [name]: {
+            rule: rule(hosts), entryPoints: [this.entryPoint], service: name,
+            ...(this.certResolver ? { tls: { certResolver: this.certResolver } } : {}),
+          },
+        },
         services: { [name]: { loadBalancer: { servers: [{ url: upstream }], passHostHeader: true } } },
       },
     }, null, 2));

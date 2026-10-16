@@ -333,14 +333,24 @@ test('échec : l\'événement et l\'alerte partent avec la raison', async () => 
 
 test('arrêter pendant une construction : le déploiement est annulé, la requête ne patiente pas', async () => {
   const { e, svc } = await setup();
+  // Une construction longue, mais interruptible — comme la vraie, que le signal tue.
   const origBuild = e.runtime.build.bind(e.runtime);
-  e.runtime.build = async (o) => { await new Promise((r) => setTimeout(r, 300)); return origBuild(o); };
+  let enCours = null;
+  e.runtime.build = async (o) => {
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(resolve, 5000);
+      enCours = resolve;
+      o.signal?.addEventListener('abort', () => { clearTimeout(t); reject(new Error('annulé')); }, { once: true });
+    });
+    return origBuild(o);
+  };
   const dep = e.deployer.deploy(svc.id);
-  await new Promise((r) => setTimeout(r, 20));
+  while (!enCours) await new Promise((r) => setTimeout(r, 5)); // la construction a commencé
   const t0 = Date.now();
   await e.deployer.stopService(svc.id);
-  assert.ok(Date.now() - t0 < 250, 'on n\'attend pas la fin de la construction');
+  const attendu = Date.now() - t0;
   await e.deployer.drain();
+  assert.ok(attendu < 1000, `on n'attend pas la fin de la construction (${attendu} ms)`);
   assert.equal(e.store.getDeployment(dep.id).status, 'canceled');
   assert.equal(e.store.getService(svc.id).desired_state, 'stopped');
 });

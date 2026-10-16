@@ -18,7 +18,7 @@ fs.mkdirSync(config.buildsDir, { recursive: true });
 const store = new Store(config.dbFile, config.secretKey);
 const logs = new LogHub(config.logsDir);
 const runtime = new DockerRuntime({ network: config.network });
-const routes = new Routes(config.routesDir);
+const routes = new Routes(config.routesDir, { entryPoint: config.entryPoint, certResolver: config.certResolver });
 const github = new GithubApi({ apiBase: config.githubApi });
 const notifier = new Notifier({ url: config.notifyUrl, onError: (e) => console.warn('[alerte]', e.message) });
 const deployer = new Deployer({ store, runtime, routes, logs, github, config, notifier });

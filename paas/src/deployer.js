@@ -286,7 +286,7 @@ export class Deployer {
       if (isDb) say(`✓ Disponible sur ${svc.name}.${project.name}.internal:${svc.port} (réseau privé)`);
       else {
         this.#route(svc, container);
-        say(`✓ En service sur ${this.store.listDomains(svc.id).map((d) => `https://${d.hostname}`).join(', ') || '(aucun domaine)'}`);
+        say(`✓ En service sur ${this.store.listDomains(svc.id).map((d) => this.config.urlFor(d.hostname)).join(', ') || '(aucun domaine)'}`);
       }
       this.store.updateService(svc.id, { active_deployment_id: dep.id });
       this.#finish(dep, 'success'); // en dernier : après, le journal est clos pour ceux qui le suivent

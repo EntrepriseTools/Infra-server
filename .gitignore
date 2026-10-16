@@ -11,4 +11,7 @@ plateforme/helm/*/charts/
 
 # Rail : la configuration locale porte les secrets.
 paas/.env
+paas/.env.dns
 paas/node_modules/
+# Engendré par install.sh d'après le mode TLS choisi (le modèle est traefik.exemple.yml).
+paas/traefik.local.yml

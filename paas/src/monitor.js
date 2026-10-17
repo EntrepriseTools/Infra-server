@@ -47,6 +47,9 @@ export class Monitor {
     const stats = await this.runtime.stats().catch(() => ({}));
     const aNous = new Set();
     for (const svc of this.store.listServices()) {
+      // Une tâche planifiée ne garde pas de conteneur : son état se lit dans son
+      // historique d'exécutions, pas dans « docker inspect ».
+      if (svc.kind === 'cron') continue;
       const dep = svc.active_deployment_id ? this.store.getDeployment(svc.active_deployment_id) : null;
       if (dep?.container) aNous.add(dep.container);
       await this.#service(svc, at, stats);

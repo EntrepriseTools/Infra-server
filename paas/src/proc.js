@@ -5,10 +5,15 @@ export class ProcError extends Error {
   constructor(msg, code, out, err = '') { super(msg); this.code = code; this.output = out; this.stderr = err; }
 }
 
-/** Exécute `cmd args`, envoie chaque morceau de sortie à onData, rejette si code ≠ 0. */
-export function run(cmd, args, { env, cwd, onData, onErr, signal, timeoutMs, input } = {}) {
+/**
+ * Exécute `cmd args`, envoie chaque morceau de sortie à onData, rejette si code ≠ 0.
+ * `input` passe une chaîne par l'entrée standard ; `inputStream` y verse un flux
+ * (une sauvegarde de plusieurs gigaoctets ne tient pas en mémoire).
+ */
+export function run(cmd, args, { env, cwd, onData, onErr, signal, timeoutMs, input, inputStream } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, { env, cwd, signal, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    const avecEntree = input !== undefined || !!inputStream;
+    const child = spawn(cmd, args, { env, cwd, signal, stdio: [avecEntree ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     let timer;
@@ -17,7 +22,12 @@ export function run(cmd, args, { env, cwd, onData, onErr, signal, timeoutMs, inp
     const takeErr = (b) => { const t = b.toString('utf8'); err = (err + t).slice(-20000); if (onErr) onErr(t); else take(b); };
     child.stdout.on('data', take);
     child.stderr.on('data', takeErr);
-    if (input !== undefined) child.stdin.end(input);
+    if (inputStream) {
+      // Une entrée fermée par l'autre bout (le client a fini de lire) n'est pas une panne.
+      child.stdin.on('error', () => {});
+      inputStream.on('error', (e) => reject(e));
+      inputStream.pipe(child.stdin);
+    } else if (input !== undefined) { child.stdin.on('error', () => {}); child.stdin.end(input); }
     if (timeoutMs) timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
     child.on('error', (e) => { clearTimeout(timer); reject(e.name === 'AbortError' ? new ProcError('annulé', null, out, err) : e); });
     child.on('close', (code, sig) => {

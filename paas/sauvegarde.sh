@@ -2,8 +2,9 @@
 # =====================================================================
 # paas/sauvegarde.sh — une archive de tout ce qui ne se reconstruit pas :
 #
-#   .env (les clés), le volume « rail_rail-data » (catalogue SQLite et
-#   journaux de déploiement) et le volume de chaque base de données.
+#   .env (les clés), le volume « rail_rail-data » (catalogue SQLite, comptes,
+#   journaux de déploiement et sauvegardes de bases gardées sur le serveur)
+#   et le volume de chaque base de données.
 #
 #   sudo ./sauvegarde.sh                  → /var/backups/rail/rail-<date>.tar.gz
 #   sudo ./sauvegarde.sh /mnt/sauvegardes

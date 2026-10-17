@@ -1,6 +1,12 @@
 // Comment construire un dépôt : son Dockerfile s'il en a un, sinon un Dockerfile
 // engendré d'après ce qu'on y trouve (Node, Python, Go, Java) — l'équivalent
-// du « zéro configuration » de Railway. Un `Procfile` (ligne `web:`) fixe la commande de démarrage.
+// du « zéro configuration » de Railway.
+//
+// Ce qui fixe la commande de démarrage, du plus fort au plus faible :
+//   1. la commande de démarrage réglée sur le service (« Réglages »)
+//   2. la ligne `web:` d'un Procfile
+//   3. ce que le projet laisse deviner (script « start », main.py, le binaire Go…)
+// Même ordre pour la commande de construction (étape `RUN` supplémentaire).
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -18,7 +24,7 @@ function procfileWeb(dir) {
 
 const DOCKERIGNORE = ['.git', 'node_modules', '__pycache__', '*.pyc', '.venv', 'target', 'build', '.env', '.env.*', '*.log', ''].join('\n');
 
-function node(dir) {
+function node(dir, o = {}) {
   const pkg = JSON.parse(read(dir, 'package.json'));
   const major = /(\d{2})/.exec(pkg.engines?.node || '')?.[1];
   const image = `node:${major && +major >= 18 && +major <= 24 ? major : 22}-slim`;
@@ -26,7 +32,7 @@ function node(dir) {
   const install = { pnpm: 'pnpm install --frozen-lockfile', yarn: 'yarn install --frozen-lockfile', npm: has(dir, 'package-lock.json') ? 'npm ci' : 'npm install' }[pm];
   const prune = { pnpm: 'pnpm prune --prod', yarn: 'yarn install --production --ignore-scripts --prefer-offline', npm: 'npm prune --omit=dev' }[pm];
   const lockfiles = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', '.npmrc'].filter((f) => has(dir, f)).join(' ');
-  let start = procfileWeb(dir);
+  let start = o.startCommand || procfileWeb(dir);
   if (!start && pkg.scripts?.start) start = `${pm} start`;
   if (!start && pkg.main) start = `node ${pkg.main}`;
   if (!start && has(dir, 'index.js')) start = 'node index.js';
@@ -40,7 +46,7 @@ function node(dir) {
       `COPY ${lockfiles} ./`,
       `RUN ${install}`,
       'COPY . .',
-      pkg.scripts?.build ? `RUN ${pm} run build` : '',
+      o.buildCommand ? `RUN ${o.buildCommand}` : (pkg.scripts?.build ? `RUN ${pm} run build` : ''),
       `RUN ${prune}`,
       'ENV NODE_ENV=production',
       'USER node',
@@ -49,10 +55,10 @@ function node(dir) {
   };
 }
 
-function python(dir) {
+function python(dir, o = {}) {
   const deps = has(dir, 'requirements.txt') ? 'COPY requirements.txt ./\nRUN pip install --no-cache-dir -r requirements.txt'
     : has(dir, 'pyproject.toml') ? null : '';
-  let start = procfileWeb(dir);
+  let start = o.startCommand || procfileWeb(dir);
   if (!start) {
     const entry = ['main.py', 'app.py', 'server.py', 'run.py'].find((f) => has(dir, f));
     if (entry) start = `python ${entry}`;
@@ -66,6 +72,7 @@ function python(dir) {
       'ENV PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1',
       'WORKDIR /app',
       deps === null ? 'COPY . .\nRUN pip install --no-cache-dir .' : `${deps}\nCOPY . .`,
+      o.buildCommand ? `RUN ${o.buildCommand}` : '',
       'RUN useradd --create-home app && chown -R app /app',
       'USER app',
       `CMD ${sh(start)}`,
@@ -73,7 +80,7 @@ function python(dir) {
   };
 }
 
-function go(dir) {
+function go(dir, o = {}) {
   const ver = /^go\s+(\d+\.\d+)/m.exec(read(dir, 'go.mod'))?.[1] || '1.23';
   let target = '.';
   if (!fs.readdirSync(dir).some((f) => f.endsWith('.go')) && has(dir, 'cmd')) {
@@ -81,7 +88,7 @@ function go(dir) {
     if (cmds.length === 1) target = `./cmd/${cmds[0].name}`;
     else throw new DetectError('Projet Go : plusieurs binaires dans cmd/ — ajoutez un Dockerfile.');
   }
-  const start = procfileWeb(dir);
+  const start = o.startCommand || procfileWeb(dir);
   return {
     language: 'go',
     dockerfile: [
@@ -90,6 +97,7 @@ function go(dir) {
       'COPY go.mod go.sum* ./',
       'RUN go mod download',
       'COPY . .',
+      ...(o.buildCommand ? [`RUN ${o.buildCommand}`] : []),
       `RUN CGO_ENABLED=0 go build -o /out/app ${target}`,
       'FROM debian:bookworm-slim',
       'RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && useradd --create-home app',
@@ -100,7 +108,7 @@ function go(dir) {
   };
 }
 
-function java(dir) {
+function java(dir, o = {}) {
   const maven = has(dir, 'pom.xml');
   const text = read(dir, maven ? 'pom.xml' : has(dir, 'build.gradle.kts') ? 'build.gradle.kts' : 'build.gradle');
   const raw = +(/<java\.version>(\d+)|<maven\.compiler\.release>(\d+)|JavaVersion\.VERSION_(\d+)|languageVersion\s*(?:=|\.set\()\s*(?:JavaLanguageVersion\.of\()?(\d+)/.exec(text)?.slice(1).find(Boolean) || 21);
@@ -111,14 +119,14 @@ function java(dir) {
   const jars = maven ? 'target' : 'build/libs';
   const baseBuild = maven ? (has(dir, 'mvnw') ? `eclipse-temurin:${v}-jdk` : `maven:3-eclipse-temurin-${v}`)
     : (has(dir, 'gradlew') ? `eclipse-temurin:${v}-jdk` : `gradle:8-jdk${v}`);
-  const start = procfileWeb(dir) || 'exec java $JAVA_OPTS -Dserver.port=${PORT:-8080} -jar /app.jar';
+  const start = o.startCommand || procfileWeb(dir) || 'exec java $JAVA_OPTS -Dserver.port=${PORT:-8080} -jar /app.jar';
   return {
     language: 'java',
     dockerfile: [
       `FROM ${baseBuild} AS build`,
       'WORKDIR /src',
       'COPY . .',
-      `RUN ${buildCmd}`,
+      `RUN ${o.buildCommand || buildCmd}`,
       `RUN cp "$(ls ${jars}/*.jar | grep -v -e '-plain.jar' -e 'sources.jar' | head -1)" /app.jar`,
       `FROM eclipse-temurin:${v}-jre`,
       'RUN useradd --create-home app',
@@ -130,7 +138,8 @@ function java(dir) {
 }
 
 /** @returns {{kind:'dockerfile', dockerfile:string} | {kind:'generated', language:string, dockerfile:string, dockerignore:boolean}} */
-export function detectBuild(contextDir, { dockerfilePath } = {}) {
+export function detectBuild(contextDir, { dockerfilePath, buildCommand = null, startCommand = null } = {}) {
+  const o = { buildCommand: buildCommand || null, startCommand: startCommand || null };
   if (dockerfilePath) {
     const f = path.join(contextDir, dockerfilePath);
     if (!fs.existsSync(f)) throw new DetectError(`Dockerfile introuvable : ${dockerfilePath}`);
@@ -138,10 +147,10 @@ export function detectBuild(contextDir, { dockerfilePath } = {}) {
   }
   if (has(contextDir, 'Dockerfile')) return { kind: 'dockerfile', dockerfile: path.join(contextDir, 'Dockerfile') };
   let g = null;
-  if (has(contextDir, 'package.json')) g = node(contextDir);
-  else if (has(contextDir, 'go.mod')) g = go(contextDir);
-  else if (has(contextDir, 'pom.xml') || has(contextDir, 'build.gradle') || has(contextDir, 'build.gradle.kts')) g = java(contextDir);
-  else if (has(contextDir, 'requirements.txt') || has(contextDir, 'pyproject.toml') || has(contextDir, 'main.py') || has(contextDir, 'app.py')) g = python(contextDir);
+  if (has(contextDir, 'package.json')) g = node(contextDir, o);
+  else if (has(contextDir, 'go.mod')) g = go(contextDir, o);
+  else if (has(contextDir, 'pom.xml') || has(contextDir, 'build.gradle') || has(contextDir, 'build.gradle.kts')) g = java(contextDir, o);
+  else if (has(contextDir, 'requirements.txt') || has(contextDir, 'pyproject.toml') || has(contextDir, 'main.py') || has(contextDir, 'app.py')) g = python(contextDir, o);
   if (!g) throw new DetectError('Langage non reconnu (Node, Python, Go, Java) et pas de Dockerfile à la racine du service.');
   return { kind: 'generated', ...g, dockerignore: !has(contextDir, '.dockerignore') };
 }

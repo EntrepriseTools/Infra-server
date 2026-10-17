@@ -1,37 +1,46 @@
 # Rail — un Railway à vous : déployer, surveiller, exploiter
 
-Rail est une plateforme de déploiement **auto-hébergée**. Vous reliez un dépôt
-GitHub : chaque `git push` construit l'API, la démarre, vérifie qu'elle répond,
-puis lui donne son adresse HTTPS — **sans coupure**, avec **retour arrière en un
-clic**. À côté, vous ajoutez des **bases de données** en un clic, et vous **voyez
-ce qui se passe** : processeur, mémoire, réseau, disponibilité, fil d'activité,
-alertes. C'est le geste de Railway, sur votre serveur.
+Rail est une plateforme de déploiement **auto-hébergée**. On s'y connecte avec un
+**identifiant et un mot de passe**, on choisit un dépôt GitHub **dans une liste**, et
+chaque `git push` construit l'application, la démarre, vérifie qu'elle répond, puis lui
+donne son adresse HTTPS — **sans coupure**, avec **retour arrière en un clic**. À côté,
+on ajoute des **bases de données**, des **tâches planifiées**, des **piles entières prises
+dans un catalogue** (n8n, Ghost, WordPress, Metabase…), et on **voit ce qui se passe** :
+processeur, mémoire, réseau, disponibilité, fil d'activité, alertes. C'est le geste de
+Railway, sur votre serveur.
 
 | Railway | Rail |
 |---|---|
-| Projet → services | Projet → services (une API = un service, une base = un service) |
-| Déploiement à chaque push | Webhook GitHub signé, une branche suivie par service |
-| Nixpacks / Dockerfile | `Dockerfile` du dépôt, sinon construction automatique **Node, Python, Go, Java** (+ `Procfile`) |
-| Variables d'environnement | Variables chiffrées au repos (AES-256-GCM), `PORT` et `RAIL_*` injectées |
-| Références `${{Postgres.DATABASE_URL}}` | **Mêmes références** : `${{ma-base.DATABASE_URL}}`, résolues au déploiement |
-| Bases managées (plugins) | **PostgreSQL, MySQL, Redis, MongoDB** : identifiants engendrés, volume persistant, sauvegarde en un clic |
+| Comptes et équipe | **Comptes avec mot de passe** (scrypt), sessions en cookie `HttpOnly` + anti-CSRF, trois rôles (lecteur, membre, administrateur), jetons d'API pour la CLI |
+| Projet → environnements → services | **Mêmes trois étages** : un projet a « production » et ce qu'on veut à côté ; un environnement se **duplique** (services et variables recopiés, bases vides et identifiants neufs) |
+| Déploiement à chaque push | Webhook GitHub signé, une branche suivie par service, **chemins surveillés** pour un monodépôt |
+| Dépôt choisi dans une liste | **Idem** : on relie un jeton GitHub, Rail liste les dépôts et les branches, devine le nom, installe le webhook et déploie |
+| Déployer une image Docker | **Idem** : un service peut partir d'une image publique au lieu d'un dépôt |
+| Templates (déploiement en un clic) | **14 modèles** : n8n, Ghost, WordPress, Metabase, Umami, Uptime Kuma, Gitea, MinIO, Vaultwarden, NocoDB, Grafana, Directus, Mailpit, Excalidraw — services créés, secrets engendrés, variables câblées, déploiement lancé |
+| Nixpacks / Dockerfile | `Dockerfile` du dépôt, sinon construction automatique **Node, Python, Go, Java** (+ `Procfile`), avec **commandes de construction et de démarrage** réglables |
+| Variables d'environnement | Variables chiffrées au repos (AES-256-GCM), **variables partagées par environnement**, `PORT` et `RAIL_*` injectées, collage d'un `.env` entier |
+| Références `${{Postgres.DATABASE_URL}}` | **Mêmes références** : `${{ma-base.DATABASE_URL}}`, résolues au déploiement, dans le même environnement |
+| Bases managées (plugins) | **9 moteurs** : PostgreSQL, MySQL, MariaDB, Redis, Valkey, MongoDB, ClickHouse, Meilisearch, RabbitMQ — identifiants engendrés, volume persistant |
 | Onglet *Data* (requêter la base) | **Console SQL** dans le navigateur et en CLI : liste des tables, résultats en tableau, export CSV, lecture seule par défaut |
+| Sauvegardes de base | **Manuelles ou planifiées** (expression cron), gardées sur le serveur, listées, téléchargeables, **restaurables en un clic**, élaguées automatiquement |
+| TCP proxy (joindre une base de l'extérieur) | **Exposition TCP** en un clic : un port de la plage `RAIL_TCP_PORTS` publié sur la machine |
+| Cron jobs | **Tâches planifiées** : une image ou un dépôt, une expression cron, un historique des exécutions avec code de sortie et sortie complète |
 | — (Railway ne voit que ses services) | **Tous les conteneurs de la machine** : ceux de Rail et les autres (piles compose, services installés à la main), mesurés, journalisés, redémarrables |
-| Volumes | Volume persistant par service (point de montage libre) |
-| Domaine `*.up.railway.app` + domaine perso | `<service>-<projet>.<votre domaine>` + domaines personnalisés, HTTPS Let's Encrypt automatique |
+| Volumes | Volume persistant par service (point de montage libre, propriétaire réglable pour les images qui ne tournent pas en root) |
+| Domaine `*.up.railway.app` + domaine perso | `<service>-<projet>.<votre domaine>` (et `-<environnement>` hors production) + domaines personnalisés, HTTPS Let's Encrypt automatique |
 | Healthcheck, déploiement sans coupure | L'ancien conteneur ne s'arrête qu'**après** que le nouveau répond et que la route a basculé |
 | Rollback | Remet l'image d'un déploiement passé, **sans reconstruire** |
 | Métriques (CPU, RAM, réseau) | **Mêmes mesures**, relevées toutes les 15 s, gardées 3 jours, avec disponibilité et redémarrages |
 | Logs de build et d'exécution | Les deux, en direct, filtrables et téléchargeables |
-| Observability / alertes | Fil d'activité + **webhook d'alerte** (Slack, Discord, le vôtre) sur panne et échec |
+| Observability / alertes | Fil d'activité **signé du compte qui a agi** + webhook d'alerte (Slack, Discord, le vôtre) sur panne, échec de déploiement, échec de tâche et de sauvegarde |
 | Arrêt / démarrage / redémarrage d'un service | Les trois, sans reconstruire |
 | Réseau privé `*.railway.internal` | `<service>.<projet>.internal` entre vos services |
 | Statut de déploiement dans GitHub | Statut de commit `rail/deploy` (en cours / succès / échec) |
 | Tableau de bord, CLI, API | Tableau de bord web, `rail` (CLI), API JSON |
 
-Ce que Rail **ne fait pas** (volontairement) : plusieurs serveurs, réplicas et
-mise à l'échelle, environnements de prévisualisation par pull request, comptes
-multiples. Voir [Limites](#limites).
+Ce que Rail **ne fait pas** (volontairement) : plusieurs serveurs, réplicas et mise à
+l'échelle horizontale, environnements de prévisualisation par pull request.
+Voir [Limites](#limites).
 
 ## Comment ça marche
 
@@ -50,6 +59,8 @@ multiples. Voir [Limites](#limites).
                                  │  toutes les 15 s : docker stats + inspect         │
                                  │   → séries CPU/mémoire/réseau, état, disponibilité│
                                  │   → fil d'activité, alertes, relance d'un tombé   │
+                                 │  toutes les 30 s : l'heure                        │
+                                 │   → tâches planifiées, sauvegardes automatiques   │
                                  └───────────────────────────┬──────────────────────┘
                                                              │ socket docker
                               conteneurs de vos API et de vos bases, réseau « rail »
@@ -76,9 +87,12 @@ et un domaine dont vous gérez le DNS.
    git clone https://github.com/EntrepriseTools/Infra-server && cd Infra-server/paas
    sudo ./install.sh          # demande le domaine et le courriel Let's Encrypt, fabrique .env, lance tout
    ```
-   Le script affiche l'adresse du tableau de bord et le **jeton d'administration**.
+   Le script demande le domaine, le courriel Let's Encrypt, puis **l'identifiant et le mot de
+   passe du compte administrateur** (il en tire un au sort si on n'en propose pas). Il affiche
+   l'adresse du tableau de bord, ces identifiants, et le **jeton d'administration** (la clé de
+   secours : API, CLI, et création d'un premier compte si besoin).
    **Sauvegardez `.env`** : sans `RAIL_SECRET_KEY`, les variables chiffrées sont perdues.
-3. Ouvrez `https://rail.apps.exemple.com`, entrez le jeton.
+3. Ouvrez `https://rail.apps.exemple.com` et connectez-vous avec cet identifiant et ce mot de passe.
 
 ### Les ports 80 et 443 sont déjà pris ?
 
@@ -113,15 +127,54 @@ Toute la configuration statique de Traefik est **engendrée par `install.sh`** d
 **Mise à jour** : `git pull && sudo ./install.sh`. Le catalogue SQLite se met à niveau tout seul au
 démarrage (migrations numérotées) ; vos conteneurs ne sont pas touchés.
 
-## Premier déploiement
+## Comptes, rôles et jetons
 
-Dans le tableau de bord : **Nouveau projet** → **+ Service** → nom, dépôt `propriétaire/dépôt`, branche, port que
-votre API écoute, chemin de santé (`/health`) → **Déployer**. Ou en CLI :
+On entre dans Rail avec un **identifiant et un mot de passe**. Le mot de passe est haché
+(scrypt, sel propre à chacun) ; la session est un **cookie `HttpOnly` + `SameSite=Lax`**
+(12 h, `RAIL_SESSION_HOURS`), et toute écriture venue du navigateur porte en plus
+**l'anti-CSRF** de la session : un autre site ne peut rien déclencher à votre place.
+
+| Rôle | Ce qu'il peut |
+|---|---|
+| **Lecteur** | tout voir : services, mesures, journaux, activité, tables d'une base. Rien changer. |
+| **Membre** | tout ce qui précède, plus : créer des projets et des services, déployer, arrêter, régler les variables, requêter et sauvegarder les bases. |
+| **Administrateur** | tout ce qui précède, plus : les **comptes** et la **machine** (nettoyage des images, jeton GitHub partagé). |
+
+- **Page Comptes** (administrateur) : créer un compte, changer un rôle, remettre un mot de
+  passe à zéro (les sessions de la personne se ferment aussitôt). Le **dernier administrateur**
+  ne peut être ni rétrogradé ni supprimé, et personne ne supprime son propre compte.
+- **Page Mon compte** : changer son mot de passe (ce qui ferme les autres sessions), voir et
+  fermer ses sessions ouvertes, relier son **compte GitHub**, fabriquer des **jetons d'API**.
+- **Jetons d'API** (`rail_…`) : pour la CLI et les scripts. Ils valent le rôle de leur
+  propriétaire, ne sont affichés **qu'une fois**, et seule leur empreinte SHA-256 est gardée.
+- **`RAIL_ADMIN_TOKEN`** reste la **clé de secours** de l'installation : il vaut administrateur,
+  crée le premier compte si la base est vide, et sert à la CLI quand on n'a pas encore de jeton.
+  Qui l'a est root sur le serveur (voir [Sécurité](#sécurité--ce-quil-faut-savoir)).
 
 ```bash
-export RAIL_URL=https://rail.apps.exemple.com RAIL_TOKEN=…
+rail whoami                                        # qui je suis, avec quel rôle
+rail users                                         # les comptes (administrateur)
+rail user:new marie --password '…' --role member
+rail token:new mon-portable                        # un jeton d'API, affiché une fois
+```
+
+## Premier déploiement
+
+Dans le tableau de bord : **Nouveau projet** → **+ Service**. Deux onglets :
+
+- **Dépôt GitHub** — reliez votre compte GitHub (un jeton collé une fois, voir plus bas) et
+  **choisissez un dépôt dans la liste** : Rail devine le nom du service, propose les branches du
+  dépôt, et, à la création, **installe le webhook** puis **lance le premier déploiement**.
+- **Image Docker** — une image publique (`nginx:1.27-alpine`, `ghcr.io/org/app:1.0`), son port,
+  un volume si besoin : rien à construire, l'image est récupérée et démarrée.
+
+Ou en CLI :
+
+```bash
+export RAIL_URL=https://rail.apps.exemple.com RAIL_TOKEN=…   # jeton d'API ou jeton d'administration
 rail project:new demo
-rail service:new demo api acme/mon-api --port 8080 --health /health --token ghp_…   # --token : dépôt privé
+rail service:new demo api acme/mon-api --port 8080 --health /health --deploy
+rail image:new demo vitrine nginx:1.27-alpine --port 80      # depuis une image
 rail vars:set demo/api JWT_SECRET=…
 rail deploy demo/api
 rail logs demo/api --build -f       # la construction en direct
@@ -132,6 +185,39 @@ rail containers                     # tout ce que Docker fait tourner sur la mac
 
 L'API répond sur `https://api-demo.apps.exemple.com`. (La CLI : `paas/bin/rail.js`, à lier ou copier dans votre `PATH`.)
 
+### Modèles : une pile entière en un clic
+
+Page **Catalogue** (ou `rail templates`) : 14 piles prêtes à l'emploi. Un clic crée les services
+(application **et** base), engendre les secrets, câble les variables entre eux, puis déploie.
+
+| Modèle | Ce que c'est | Services |
+|---|---|---|
+| **n8n** | automatisation entre vos outils, sans code | n8n + PostgreSQL |
+| **Ghost** | blog et infolettre | ghost + MySQL |
+| **WordPress** | le site le plus répandu | wordpress + MariaDB |
+| **Metabase** | questions et tableaux de bord sur vos bases | metabase + PostgreSQL |
+| **Umami** | mesure d'audience sans cookie | umami + PostgreSQL |
+| **Uptime Kuma** | surveillance de sites et alertes | uptime |
+| **Gitea** | votre forge Git | gitea + PostgreSQL |
+| **MinIO** | stockage de fichiers compatible S3 | minio |
+| **Vaultwarden** | coffre à mots de passe (Bitwarden) | vaultwarden |
+| **NocoDB** | un tableur qui est une vraie base | nocodb + PostgreSQL |
+| **Grafana** | tableaux de bord de mesures | grafana |
+| **Directus** | CMS « headless » et API sur une base | directus + PostgreSQL |
+| **Mailpit** | boîte aux lettres d'essai (SMTP qui n'envoie rien) | mailpit |
+| **Excalidraw** | tableau blanc à main levée | excalidraw |
+
+```bash
+rail templates                                  # le catalogue
+rail template demo n8n                          # déployer dans demo/production
+rail template demo ghost --prefix blog          # deux fois le même modèle dans un projet
+```
+
+Les versions d'images sont volontairement peu précises (majeure, ou `latest`) pour survivre au
+temps : chaque service garde son image **modifiable dans ses réglages**, et épingler une version
+est à un champ de distance. Un modèle n'est qu'un point de départ : après coup, ce sont des
+services ordinaires (variables, domaines, sauvegardes, mesures).
+
 ### Déployer à chaque push
 
 Réglages du service → **Installer le webhook** (nécessite un jeton GitHub avec **Webhooks : écriture**), ou à la main :
@@ -141,25 +227,71 @@ déploie **le commit exact poussé** (pas la pointe de la branche, qui peut avoi
 
 ### Jetons GitHub
 
-Un dépôt public n'en demande aucun. Pour un dépôt privé, créez un **jeton à portée limitée** (*fine-grained*,
-limité à ce dépôt) : `Contents: read`, plus `Webhooks: write` pour l'installation automatique, plus
-`Commit statuses: write` pour le statut `rail/deploy`. Il se met par service (chiffré au repos, jamais renvoyé par
-l'API, jamais écrit dans les logs) ou globalement (`GITHUB_TOKEN` dans `.env`).
+Un dépôt public n'en demande aucun pour être construit. Pour **lister vos dépôts**, et pour un dépôt privé, créez un
+**jeton à portée limitée** (*fine-grained*) : `Contents: read`, plus `Webhooks: write` pour l'installation automatique,
+plus `Commit statuses: write` pour le statut `rail/deploy`.
+
+Trois endroits où le poser, du plus précis au plus large — Rail prend le premier qui existe :
+
+| Où | Pour qui | Quand |
+|---|---|---|
+| *Mon compte → Compte GitHub* | vous seul | le cas normal : chacun relie le sien |
+| *Mon compte → « partager avec toute la plateforme »* (administrateur) | tout le monde | les dépôts d'une organisation, un jeton de service |
+| `GITHUB_TOKEN` dans `.env` | tout le monde | dernier recours, hérité d'avant les comptes |
+| *Réglages d'un service → Jeton GitHub du service* | ce service | un dépôt qui demande un autre accès |
+
+Tous sont chiffrés au repos, jamais renvoyés par l'API, jamais écrits dans les journaux.
+
+## Environnements
+
+Un projet a toujours **« production »**. On peut en ajouter d'autres (« preprod », « demo »,
+le nom d'un client) : **page du projet → + Environnement**. Le même service y porte le même
+nom, et tout est séparé.
+
+| | production | un autre environnement (« preprod ») |
+|---|---|---|
+| Adresse publique | `api-demo.apps.exemple.com` | `api-demo-preprod.apps.exemple.com` |
+| Réseau privé | `api.demo.internal` | `api.demo-preprod.internal` |
+| Variables, bases, volumes | les leurs | les leurs |
+| Références `${{base.DATABASE_URL}}` | résolues **dans** production | résolues **dans** preprod |
+
+**Dupliquer** un environnement recrée la *description* de ses services (dépôt, branche, image,
+variables, domaines, planifications) — pas leurs données : les bases repartent vides avec des
+**identifiants neufs**, et rien n'est déployé tant qu'on ne le demande pas. C'est le geste
+« je veux la même chose, pour essayer ».
+
+**Variables partagées** : page du projet → *Variables partagées*. Elles sont fournies à **tous**
+les services de l'environnement ; une variable du service, de même nom, l'emporte. L'onglet
+*Variables* d'un service montre les deux listes.
+
+```bash
+rail envs demo                                  # les environnements d'un projet
+rail env:new demo preprod --copy production     # dupliquer
+rail env:vars:set demo/preprod ZONE=bac-a-sable # variables partagées
+rail service demo/preprod/api                   # « projet/env/service » désigne un service
+rail env:rm demo/preprod                        # avec ses services et ses volumes
+```
 
 ## Bases de données
 
 **+ Base de données** dans un projet, ou `rail db:new demo base --engine postgres`.
 
-| Moteur | Image | Port | Volume | Sauvegarde intégrée |
-|---|---|---|---|---|
-| PostgreSQL | `postgres:16-alpine` | 5432 | `/var/lib/postgresql/data` | `pg_dump` |
-| MySQL | `mysql:8` | 3306 | `/var/lib/mysql` | `mysqldump` |
-| Redis | `redis:7-alpine` | 6379 | `/data` (AOF) | — (copiez le volume) |
-| MongoDB | `mongo:7` | 27017 | `/data/db` | `mongodump` |
+| Moteur | Image | Port | Volume | Console SQL | Sauvegarde / restauration |
+|---|---|---|---|---|---|
+| PostgreSQL 16 | `postgres:16-alpine` | 5432 | `/var/lib/postgresql/data` | oui | `pg_dump` / `psql` |
+| MySQL 8 | `mysql:8` | 3306 | `/var/lib/mysql` | oui | `mysqldump` / `mysql` |
+| MariaDB 11 | `mariadb:11` | 3306 | `/var/lib/mysql` | oui | `mariadb-dump` / `mariadb` |
+| Redis 7 | `redis:7-alpine` | 6379 | `/data` (AOF) | — | — (copiez le volume) |
+| Valkey 8 | `valkey/valkey:8-alpine` | 6379 | `/data` (AOF) | — | — (copiez le volume) |
+| MongoDB 7 | `mongo:7` | 27017 | `/data/db` | — | `mongodump` / `mongorestore` |
+| ClickHouse 24 | `clickhouse/clickhouse-server:24.8-alpine` | 8123 | `/var/lib/clickhouse` | oui | — (copiez le volume) |
+| Meilisearch 1.11 | `getmeili/meilisearch:v1.11` | 7700 | `/meili_data` | — | — (copiez le volume) |
+| RabbitMQ 4 | `rabbitmq:4-alpine` | 5672 | `/var/lib/rabbitmq` | — | — (copiez le volume) |
 
 Rail engendre les identifiants, crée le volume, démarre le conteneur et attend qu'il accepte les
-connexions. La base **n'est jamais publiée sur Internet** : ni domaine, ni port ouvert. On l'atteint
-par le réseau privé, à `<nom>.<projet>.internal:<port>`.
+connexions. Par défaut la base **n'est pas publiée sur Internet** : ni domaine, ni port ouvert. On
+l'atteint par le réseau privé, à `<nom>.<projet>.internal:<port>` — et, si on le demande
+explicitement, par [exposition TCP](#joindre-une-base-depuis-lextérieur-exposition-tcp).
 
 **Brancher une API dessus** — onglet *Variables* du service, puis une référence :
 
@@ -201,14 +333,76 @@ aucun pilote SQL n'est embarqué dans le plan de contrôle, et la base reste fer
 Redis et MongoDB n'ont pas de console (ils ne parlent pas SQL) : utilisez
 `docker exec -it <conteneur> redis-cli -u "$REDIS_URL"`, affiché dans l'onglet *Connexion*.
 
-**Sauvegarder** : *Réglages → Télécharger une sauvegarde*, ou `rail backup demo/base > dump.sql`.
-C'est un export **logique** (il se restaure dans une autre version du moteur, ailleurs). Pour l'image
-complète du serveur, voir [Sauvegardes](#sauvegardes).
+### Joindre une base depuis l'extérieur (exposition TCP)
+
+*Réglages de la base → Exposition TCP → Exposer* publie son port sur la machine, dans la plage
+`RAIL_TCP_PORTS` (20000-20050 par défaut) — de quoi brancher `psql`, un client graphique ou un
+service extérieur. Le port s'ouvre **au redéploiement suivant**, et l'adresse à donner est affichée.
+
+```bash
+rail expose demo/base              # un port libre de la plage
+rail expose demo/base --port 20010 # ou celui-là
+rail redeploy demo/base            # c'est le redéploiement qui ouvre le port
+rail unexpose demo/base
+```
+
+Rien n'est exposé sans ce geste. Deux précautions : **ouvrez le port dans le pare-feu** du serveur
+seulement si l'accès doit venir d'Internet (sinon `RAIL_TCP_BIND=127.0.0.1` + un tunnel SSH), et
+rappelez-vous que la base devient alors joignable par qui a le mot de passe.
+
+### Sauvegardes d'une base
+
+Onglet **Sauvegardes** d'une base : une sauvegarde maintenant, une **planification** (expression
+cron), le nombre de sauvegardes à garder, et pour chacune : télécharger, **restaurer**, supprimer.
+Les fichiers vivent dans `/data/backups/<service>/` du volume de Rail (donc dans l'archive de
+`sauvegarde.sh`), et les plus vieilles sont élaguées automatiquement.
+
+```bash
+rail backup demo/base > dump.sql        # un export en flux, rien n'est gardé sur le serveur
+rail backup:new demo/base               # une sauvegarde gardée sur le serveur
+rail backups demo/base                  # la liste, avec tailles et origines
+rail backup:get <id> > dump.sql         # télécharger une sauvegarde gardée
+rail backup:restore <id>                # ÉCRASE les données actuelles
+rail backup:auto demo/base "0 3 * * *" --keep 14
+```
+
+Une sauvegarde en échec est **inscrite en échec, avec sa raison**, et déclenche une alerte : c'est la
+seule façon de s'apercevoir qu'elle ne marchait plus. Restaurer écrase les données actuelles —
+l'interface fait confirmer, et l'activité garde la trace. C'est un export **logique** (il se restaure
+dans une autre version du moteur, ailleurs) ; pour l'image complète du serveur, voir
+[Sauvegardes](#sauvegardes).
 
 > **Attention aux volumes.** Un service avec volume ne peut pas tourner en double : au redéploiement,
 > l'ancien conteneur est arrêté **avant** le démarrage du nouveau (quelques secondes d'interruption).
 > Si le nouveau n'est pas sain, l'ancien est remis en marche. Supprimer le service supprime le volume
 > et ses données (`DELETE …?keep_volume=1` pour le garder).
+
+## Tâches planifiées (cron)
+
+**+ Tâche planifiée** dans un projet : une image ou un dépôt, une commande, et une **expression
+cron** à cinq champs (`minute heure jour mois jour-semaine`, ou `@daily`). Rail construit (ou
+récupère) l'image **une fois**, puis lance un conteneur **jetable** (`--rm`) à l'heure dite.
+
+```
+0 3 * * *     chaque nuit à 3 h          */15 * * * *   tous les quarts d'heure
+30 6 * * 1-5  en semaine à 6 h 30        0 5 1 * *      le 1er du mois à 5 h
+```
+
+Une tâche n'a ni domaine, ni conteneur permanent : son onglet **Exécutions** garde l'historique
+(début, durée, **code de sortie**, sortie complète), et le bouton *Exécuter maintenant* ne dépend
+pas de la planification. Une exécution qui sort en erreur est un échec visible, et une alerte part.
+L'heure est celle du serveur (UTC dans un conteneur par défaut) ; une tâche **suspendue** ne part plus.
+
+```bash
+rail job:new demo menage --schedule "0 3 * * *" --image alpine:3 --start "sh /nettoie.sh"
+rail job:new demo rapports --schedule "@daily" acme/mon-api --start "node scripts/rapport.js"
+rail run demo/menage      # tout de suite
+rail runs demo/menage     # l'historique, et la prochaine exécution
+```
+
+Deux garde-fous : jamais deux exécutions en parallèle pour une même tâche, et jamais deux fois la
+même minute (même si l'horloge tourne plus souvent) — y compris après un redémarrage du plan de
+contrôle, qui marque en échec ce qui avait été coupé en vol.
 
 ## Surveiller
 
@@ -266,7 +460,9 @@ interface (`docker compose restart control`, sur le serveur).
 | **Arrêter** | le conteneur est stoppé et la route retirée (404) ; l'état voulu devient « arrêté » | rien n'est supprimé : image, volume et variables restent |
 | **Démarrer** | le conteneur repart et la route revient ; s'il a disparu, l'image est relancée | aucune reconstruction |
 | **Redéployer** | relance l'image en service avec la configuration actuelle | aucune reconstruction |
-| **Déployer** | reconstruit depuis le dépôt | — |
+| **Déployer** | reconstruit depuis le dépôt (ou récupère l'image) | — |
+| **Suspendre** (tâche planifiée) | les exécutions planifiées ne partent plus | l'historique et l'image restent |
+| **Exécuter maintenant** (tâche planifiée) | un conteneur jetable, tout de suite | la planification n'est pas touchée |
 
 Un service arrêté le reste après un redémarrage du plan de contrôle ; un conteneur resté sur le carreau
 après un reboot de la machine est relancé et re-routé automatiquement.
@@ -291,15 +487,24 @@ Tout est exécuté **sans privilèges** (utilisateur non-root). Un langage non r
 
 - **Variables** : onglet *Variables* ou `rail vars:set`. Elles s'appliquent au **prochain déploiement** — « Enregistrer et
   redéployer » relance l'image en service avec la nouvelle configuration, **sans reconstruire**. `PORT`, `PATH`, `HOME`, `LD_*`,
-  `DOCKER_*`, `RAIL_*` sont réservés. Fournies à l'API : `RAIL_PROJECT_NAME`, `RAIL_SERVICE_NAME`, `RAIL_GIT_COMMIT_SHA`,
-  `RAIL_DEPLOYMENT_ID`, `RAIL_PUBLIC_DOMAIN`, `RAIL_PRIVATE_DOMAIN`.
+  `DOCKER_*`, `RAIL_*` sont réservés. Fournies à l'application : `RAIL_PROJECT_NAME`, `RAIL_ENVIRONMENT_NAME`,
+  `RAIL_SERVICE_NAME`, `RAIL_SERVICE_ID`, `RAIL_GIT_COMMIT_SHA`, `RAIL_DEPLOYMENT_ID`, `RAIL_PUBLIC_DOMAIN`, `RAIL_PRIVATE_DOMAIN`.
+  Un bouton **« Coller un .env »** ajoute tout un fichier d'un coup. `rail vars demo/api --resolved` montre ce que le
+  conteneur recevra vraiment (partagées comprises, références résolues).
+- **Variables partagées** : page du projet, par environnement. Celles du service l'emportent.
 - **Références** : `${{autre-service.CLE}}` dans n'importe quelle valeur (voir [Bases de données](#bases-de-données)).
 - **Domaine personnalisé** : enregistrement DNS A vers le serveur, *Domaines → Ajouter*, *Redéployer*. Le certificat est
   demandé automatiquement au premier accès.
 - **Entre services** : `http://<service>.<projet>.internal:<port>` (sans HTTPS, sans passer par Internet).
 - **PostgreSQL de l'hôte** (plutôt qu'une base managée) : depuis un conteneur, l'hôte s'appelle `host.docker.internal`.
   PostgreSQL doit écouter sur l'adresse du pont Docker et son `pg_hba.conf` l'autoriser — ne l'ouvrez jamais à Internet.
-- **Volume persistant** sur un service ordinaire : *Réglages → Volume persistant*, un chemin absolu (`/data`).
+- **Volume persistant** sur un service ordinaire : *Réglages → Volume persistant*, un chemin absolu (`/data`). Pour une
+  image qui ne tourne pas en root (Grafana 472, Gitea ou n8n 1000), renseignez le **propriétaire du volume** : Rail le
+  prépare avec le bon utilisateur à la création.
+- **Monodépôt** : *Réglages → Chemins surveillés* (`services/api, paquets/commun`). Un push qui ne touche aucun de ces
+  chemins ne déclenche aucune construction — et l'activité dit pourquoi.
+- **Commandes** : *Réglages → Commande de construction / de démarrage*, pour les dépôts sans `Dockerfile` (un dépôt qui a
+  son `Dockerfile` garde le sien, et Rail le dit dans le journal).
 
 ## Déploiement sans coupure, retour arrière
 
@@ -317,8 +522,10 @@ Attention : un retour arrière remet du code, pas un schéma de base de données
 
 | Quoi | Comment | Quand |
 |---|---|---|
-| Une base, export logique | *Réglages → Télécharger une sauvegarde*, ou `rail backup demo/base > dump.sql` | avant une migration, ou chaque jour en cron |
-| Tout le serveur | `sudo ./sauvegarde.sh [dossier]` — `.env`, le catalogue SQLite, les journaux, et **tous** les volumes | en cron, puis copié hors du serveur |
+| Une base, gardée sur le serveur | onglet *Sauvegardes* → *Sauvegarder maintenant*, ou `rail backup:new demo/base` | avant une migration |
+| Une base, automatiquement | onglet *Sauvegardes* → une planification cron, ou `rail backup:auto demo/base "0 3 * * *"` | tous les jours, sans y penser |
+| Une base, en flux vers chez vous | `rail backup demo/base > dump.sql` | pour emporter le dump ailleurs |
+| Tout le serveur | `sudo ./sauvegarde.sh [dossier]` — `.env`, le catalogue SQLite, les journaux, les sauvegardes de bases, et **tous** les volumes | en cron, puis copié hors du serveur |
 
 ```bash
 # tous les jours à 3 h 15, 14 jours de rétention (RETENTION_J pour changer)
@@ -334,13 +541,19 @@ rien : copiez l'archive ailleurs.
 | Sujet | Position |
 |---|---|
 | **Socket Docker** | Le plan de contrôle y a accès : **qui contrôle Rail est root sur le serveur.** Le jeton d'administration doit être traité comme un accès root (long, jamais committé, `.env` en 0600). Le conteneur tourne en non-root, `no-new-privileges`, et Traefik, exposé à Internet, n'a pas le socket. |
-| **Jeton d'admin** | Comparé en temps constant ; 10 échecs par minute et par IP → 429. Le tableau de bord le garde dans `sessionStorage` (effacé à la fermeture de l'onglet) et applique une CSP stricte (`script-src 'self'`, `frame-ancestors 'none'`) : tout le code de la page vient de fichiers servis par Rail. Mettez le tableau de bord derrière un VPN ou une liste d'IP si possible. |
+| **Mots de passe** | Jamais stockés : seul le haché **scrypt** (coût 2^14, sel de 16 octets propre à chacun) entre en base. 10 caractères au moins, et les évidences refusées. Une connexion ratée coûte le même temps de calcul qu'une connexion à un compte inexistant : le délai de réponse ne dit pas si le compte existe. 10 essais par minute et par IP → 429. |
+| **Sessions** | Un jeton de 32 octets dans un cookie `HttpOnly`, `SameSite=Lax`, `Secure` (hors mode `proxy` en clair) ; en base, seule son **empreinte SHA-256**. Toute écriture venue d'un cookie exige l'**anti-CSRF** de la session. Changer son mot de passe ferme les autres sessions ; un administrateur qui remet un mot de passe à zéro ferme celles de la personne. Durée 12 h par défaut. |
+| **Rôles** | Chaque route demande un rang minimum (lecteur < membre < administrateur) : les comptes et la machine sont réservés aux administrateurs, les écritures aux membres. Un jeton d'API vaut le rôle de son propriétaire, jamais plus. |
+| **Jeton d'admin** | Comparé en temps constant ; même limite d'essais. Il vaut un **accès root au serveur** : long, jamais committé, `.env` en 0600. Le tableau de bord applique une CSP stricte (`script-src 'self'`, `frame-ancestors 'none'`) : tout le code de la page vient de fichiers servis par Rail. Mettez le tableau de bord derrière un VPN ou une liste d'IP si possible. |
+| **Activité** | Chaque événement porte **qui l'a demandé** (compte, jeton d'administration, GitHub, l'horloge) : connexions, créations, suppressions, écritures SQL, restaurations. L'histoire survit à la suppression d'un service. |
 | **Webhook** | Seule route publique en écriture ; authentifiée par HMAC-SHA256 (secret propre à chaque service), 401 identique que le service existe ou non. |
 | **Secrets** | Variables, identifiants de bases, jeton GitHub et secret de webhook chiffrés (AES-256-GCM) dans SQLite ; clé dans `.env`. Les variables passent au conteneur par l'environnement du client docker (`-e NOM`), **jamais dans les arguments** donc jamais dans `ps` — y compris le mot de passe d'un `mysqldump`. Le jeton GitHub passe à `git` par `GIT_CONFIG_*` et est masqué des journaux. |
 | **Vos conteneurs** | `--cap-drop ALL` (+ `NET_BIND_SERVICE`), `no-new-privileges`, `--pids-limit 512`, journaux tournés, mémoire 512 Mo et 1 CPU par défaut (réglables). |
 | **Conteneurs de bases** | Mêmes règles, plus cinq capacités que les images officielles exigent pour préparer leur volume puis redescendre vers leur utilisateur (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID`). C'est le strict nécessaire, et `no-new-privileges` tient toujours. |
-| **Bases de données** | Jamais de port publié, jamais de domaine : seulement le réseau privé `rail`. Mots de passe engendrés (18 octets aléatoires), jamais affichés en clair dans l'interface sans un clic. |
-| **Console SQL** | Réservée au jeton d'administration, lecture seule par défaut, minuterie de 30 s, requête passée par l'entrée standard (jamais dans `ps`), toute écriture inscrite dans l'activité. Elle donne, de fait, un accès complet aux données de vos bases : c'est le même niveau de confiance que le jeton lui-même. |
+| **Bases de données** | Aucun domaine, et **aucun port publié sans un geste explicite** (*Exposition TCP*, dans une plage réglée à l'avance) : sinon, seulement le réseau privé `rail`. Mots de passe engendrés (18 octets aléatoires), jamais affichés en clair dans l'interface sans un clic. |
+| **Console SQL** | Réservée aux membres et plus, lecture seule par défaut, minuterie de 30 s, requête passée par l'entrée standard (jamais dans `ps`), toute écriture inscrite dans l'activité avec son auteur. Elle donne, de fait, un accès complet aux données de vos bases. |
+| **Tâches planifiées** | Conteneur jetable, même durcissement que les services, minuterie (`RAIL_JOB_TIMEOUT_S`, 1 h), jamais deux en parallèle, sortie tronquée à 20 000 caractères en base. |
+| **Jetons GitHub** | Chiffrés au repos, par compte (chacun le sien) ou partagés par un administrateur pour toute la plateforme. Jamais renvoyés par l'API, jamais écrits dans un journal (masqués à la source). |
 | **Conteneurs hors Rail** | Rail peut les lire, les journaliser et les redémarrer (le jeton vaut déjà un accès root via le socket Docker). Il ne modifie jamais leur configuration, et refuse d'arrêter son propre conteneur. |
 | **Entrées** | Noms, dépôts, branches, chemins, domaines, images, variables : validés par liste blanche avant de toucher une commande, un chemin ou une règle de routage ; aucun shell n'interprète rien (tableaux d'arguments partout). |
 | **À savoir** | Le code construit est celui de **vos** dépôts : ne reliez pas de dépôt que vous ne maîtrisez pas (un `Dockerfile` s'exécute sur le serveur). Tous les services partagent le réseau `rail` : pas d'isolation réseau entre projets, donc une API d'un projet peut joindre la base d'un autre projet si elle en connaît le mot de passe. |
@@ -360,14 +573,20 @@ rail status                          # le serveur et les services, depuis n'impo
 - **Redémarrer le plan de contrôle ne coupe aucun service** : vos conteneurs sont indépendants (`--restart unless-stopped`)
   et Traefik garde ses routes. Au redémarrage, un déploiement en cours est marqué échoué, les routes sont réécrites depuis
   la base, et un conteneur arrêté par accident est relancé.
-- **Tests** : `cd paas && npm test` (78 tests : un vrai dépôt git local, un faux Docker, de vraies requêtes HTTP — sans Docker).
+- **Tests** : `cd paas && npm test` (109 tests : un vrai dépôt git local, un faux Docker, de vraies requêtes HTTP — sans Docker ;
+  comptes et rôles, environnements, modèles, images, cron, sauvegardes, exposition, chemins surveillés, et la montée de
+  version 2 → 3 de la base).
   `./test/integration.sh` joue le tout contre un **vrai** Docker : construction de l'image, déploiement d'un vrai
-  PostgreSQL, mesures, console SQL (lecture, écriture, refus en lecture seule), sauvegarde logique, inventaire des
-  conteneurs, arrêt, redéploiement avec persistance des données, suppression. La CI joue les deux.
+  PostgreSQL, mesures, console SQL (lecture, écriture, refus en lecture seule), comptes et anti-CSRF, un service bâti
+  sur une image publique, une tâche planifiée et sa sortie, une sauvegarde restaurée après un `DROP TABLE`, un port TCP
+  joint depuis l'extérieur, un environnement dupliqué, inventaire des conteneurs, redéploiement avec persistance des
+  données, suppression. La CI joue les deux.
   Le tableau de bord se teste dans un vrai navigateur (facultatif, hors CI : il demande une dépendance) :
   `npm i --no-save playwright-core && CHROME=/usr/bin/google-chrome node test/navigateur.mjs --photos /tmp/rail` —
-  il clique tous les gestes (créer, déployer, arrêter, filtrer les journaux, survoler un graphique, téléphone) et
-  échoue à la moindre erreur de console.
+  26 gestes : se connecter, créer un projet, choisir un dépôt dans la liste, déployer une image, dupliquer un
+  environnement, régler des variables, lire les journaux, requêter une base, sauvegarder, exécuter une tâche,
+  déployer un modèle, fabriquer un jeton, créer un compte, vérifier qu'un **lecteur** ne peut rien changer, et
+  qu'un téléphone ne déborde pas. Il échoue à la moindre erreur de console.
 
 ## Dépannage
 
@@ -389,14 +608,22 @@ rail status                          # le serveur et les services, depuis n'impo
 | « cannot execute INSERT in a read-only transaction » | la console SQL est en lecture seule : décochez la case (ou `--write`) |
 | « pas de console SQL pour redis » | Redis et MongoDB ne parlent pas SQL : voir la commande `docker exec` de l'onglet *Connexion* |
 | Un conteneur hors Rail n'apparaît pas | il est arrêté : cochez « tout » (`rail containers --all`) |
-| Disque plein | *Système → Nettoyer les images orphelines*, puis vérifier les volumes des bases supprimées (`docker volume ls`) |
+| Disque plein | *Système → Nettoyer les images orphelines*, puis vérifier les volumes des bases supprimées (`docker volume ls`) et les sauvegardes gardées (`rail backups …`) |
+| « jeton anti-CSRF manquant » | la page a été laissée ouverte trop longtemps : rechargez-la (la session a changé) |
+| « réservé au rôle … » | votre compte est lecteur, ou l'action demande un administrateur |
+| « aucun jeton GitHub » | reliez votre compte dans *Mon compte → Compte GitHub* (ou demandez à un administrateur un jeton partagé) |
+| Un modèle ne démarre pas | l'image demande souvent un volume à elle : vérifiez le **propriétaire du volume** dans ses réglages, et lisez ses logs d'exécution |
+| Une tâche planifiée ne part pas | elle est suspendue, sa planification est invalide, ou l'heure du serveur n'est pas celle que vous croyez (UTC) |
+| Le port exposé ne répond pas | il faut **redéployer** après *Exposer*, et ouvrir le port dans le pare-feu de la machine |
 
 ## Limites
 
-Un seul serveur, un seul conteneur par service (pas de réplicas ni de mise à l'échelle), pas d'aperçu par pull request,
-pas de multi-utilisateur (un seul jeton d'administration), pas de variables disponibles **pendant** la construction
-(voir ci-dessous), certificats par nom (pas de joker : Let's Encrypt limite le nombre de nouveaux certificats par
-domaine et par semaine), mesures gardées 72 h par défaut (ce n'est pas un Prometheus).
+Un seul serveur, un seul conteneur par service (pas de réplicas ni de mise à l'échelle horizontale), pas d'aperçu
+par pull request, pas de variables disponibles **pendant** la construction (voir ci-dessous), pas de registre privé
+pour les images (seulement des images publiques ; pour une image privée, construisez depuis le dépôt), certificats
+par nom (pas de joker : Let's Encrypt limite le nombre de nouveaux certificats par domaine et par semaine), mesures
+gardées 72 h par défaut (ce n'est pas un Prometheus), et pas d'isolation réseau entre projets (tous les services
+partagent le réseau `rail`).
 
 *Variables de construction* : volontairement absentes — un secret passé en `--build-arg` reste lisible dans l'historique de l'image.
 Si une étape de build en a besoin, utilisez un `Dockerfile` avec des montages secrets BuildKit.
@@ -406,19 +633,30 @@ Si une étape de build en a besoin, utilisez un `Dockerfile` avec des montages s
 ```
 paas/
 ├─ src/          plan de contrôle
-│   ├─ main.js       câblage et démarrage          api.js       API JSON, webhook, fichiers du tableau de bord
+│   ├─ main.js       câblage et démarrage          config.js    toute la configuration
+│   ├─ api.js        le serveur : routes, droits, fichiers du tableau de bord
+│   ├─ api_platform.js  santé, vue d'ensemble, machine, conteneurs, activité
+│   ├─ api_account.js   installation, connexion, comptes, jetons, GitHub
+│   ├─ api_apps.js      projets, environnements, services, déploiements, modèles, webhook
+│   ├─ api_data.js      bases managées, console SQL, sauvegardes
+│   ├─ api_shared.js    la forme publique d'un service, les « ou 404 »
+│   ├─ auth.js       qui parle, et avec quel droit  users.js     mots de passe, rôles, cookies
 │   ├─ deployer.js   la file et le déploiement     monitor.js   relevés, états, réparation automatique
+│   ├─ scheduler.js  l'horloge (cron, sauvegardes) backup.js    fabriquer, garder, restaurer
+│   ├─ cron.js       les planifications            naming.js    les noms d'hôtes et de volumes
 │   ├─ runtime.js    tout ce qui parle à Docker    databases.js catalogue des moteurs managés
-│   ├─ detect.js     construction sans Dockerfile  source.js    git fetch d'un commit précis
-│   ├─ db.js         SQLite : catalogue, mesures, événements, migrations
+│   ├─ templates.js  le catalogue en un clic       detect.js    construction sans Dockerfile
+│   ├─ db.js         SQLite : catalogue, comptes, mesures, événements, migrations
 │   ├─ sql.js        console SQL : lire le CSV de psql, le TSV de mysql
 │   ├─ routes.js     fichiers de route Traefik     vars.js      références ${{service.CLE}}
 │   ├─ crypto.js     secrets au repos              notify.js    alertes sortantes
-│   ├─ github.js     webhooks et statuts           validate.js  listes blanches d'entrées
-│   └─ logs.js       journaux de déploiement       config.js    toute la configuration
-├─ web/          le tableau de bord (index.html, style.css, ui.js, app.js — aucune dépendance)
+│   ├─ github.js     dépôts, branches, webhooks    validate.js  listes blanches d'entrées
+│   ├─ source.js     git fetch d'un commit précis  proc.js      lancer un programme sans shell
+│   └─ logs.js       journaux de déploiement       http.js      routeur minimal
+├─ web/          le tableau de bord (index.html, style.css, ui.js, app.js, views.js — aucune dépendance)
 ├─ bin/rail.js   la CLI
-├─ test/         unitaires, déploiement, bases de données, surveillance, API/CLI, et integration.sh (vrai Docker)
+├─ test/         unitaires, comptes, fonctionnalités, déploiement, bases, surveillance, API/CLI,
+│                navigateur.mjs (vrai navigateur) et integration.sh (vrai Docker)
 ├─ compose.yaml  Traefik + plan de contrôle        Dockerfile    image du plan de contrôle
 ├─ install.sh    installation idempotente          sauvegarde.sh archive complète
 ├─ traefik.exemple.yml  modèle de la configuration statique (install.sh engendre traefik.local.yml)

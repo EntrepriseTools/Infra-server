@@ -15,6 +15,10 @@ export class Scheduler {
     this.timer = null;
     this.ticks = 0;
     this.busy = false;
+    // Ce qui a déjà été lancé pendant la minute en cours : une tâche ne part
+    // qu'une fois, même si l'horloge tourne plus souvent qu'une fois par minute.
+    this.fired = new Set();
+    this.firedMinute = null;
   }
 
   start() {
@@ -29,6 +33,8 @@ export class Scheduler {
     if (this.busy) return; // un tour qui traîne ne se double pas
     this.busy = true;
     this.ticks++;
+    const cette = minute(at.toISOString());
+    if (this.firedMinute !== cette) { this.fired.clear(); this.firedMinute = cette; }
     try {
       await this.#jobs(at);
       await this.#backups(at);
@@ -40,10 +46,17 @@ export class Scheduler {
     for (const svc of this.store.servicesWithCron()) {
       if (svc.kind !== 'cron' || svc.desired_state === 'stopped') continue;
       if (!cronValid(svc.cron_schedule) || !cronMatches(svc.cron_schedule, at)) continue;
-      const dernier = this.store.listRuns(svc.id, 1)[0];
-      // Déjà lancé dans cette minute (ou encore en cours) : on passe.
-      if (dernier && (minute(dernier.started_at) === minute(at.toISOString()) || dernier.status === 'running')) continue;
+      if (this.fired.has(`job:${svc.id}`)) continue;
+      const recents = this.store.listRuns(svc.id, 10);
+      // Une exécution encore en cours : on ne la double pas.
+      if (recents[0]?.status === 'running') continue;
+      // Et après un redémarrage du plan de contrôle (mémoire vide), l'historique se
+      // souvient qu'une exécution PLANIFIÉE a déjà eu lieu dans la minute qui court.
+      // Une exécution lancée à la main, elle, n'empêche jamais l'heure dite d'arriver.
+      const planifiee = recents.find((x) => x.trigger === 'schedule');
+      if (planifiee && minute(planifiee.started_at) === minute(new Date().toISOString())) continue;
       try {
+        this.fired.add(`job:${svc.id}`);
         await this.deployer.runJob(svc.id, { trigger: 'schedule' });
       } catch (e) {
         this.store.addEvent({
@@ -60,9 +73,11 @@ export class Scheduler {
     for (const svc of this.store.servicesWithBackup()) {
       if (svc.kind !== 'database') continue;
       if (!cronValid(svc.backup_schedule) || !cronMatches(svc.backup_schedule, at)) continue;
-      const derniere = this.store.listBackups(svc.id, 1)[0];
-      if (derniere && minute(derniere.created_at) === minute(at.toISOString())) continue;
+      if (this.fired.has(`backup:${svc.id}`)) continue;
+      const planifiee = this.store.listBackups(svc.id, 10).find((x) => x.trigger === 'schedule');
+      if (planifiee && minute(planifiee.created_at) === minute(new Date().toISOString())) continue;
       try {
+        this.fired.add(`backup:${svc.id}`);
         await this.backups.create(svc.id, { trigger: 'schedule' });
       } catch (e) {
         this.store.addEvent({

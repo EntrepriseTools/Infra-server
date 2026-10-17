@@ -19,7 +19,7 @@
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 header{display:flex;align-items:center;gap:8px;padding:10px 20px;border-bottom:1px solid var(--line);background:var(--card);position:sticky;top:0;z-index:5;flex-wrap:wrap}
 header .logo{font-weight:700;font-size:17px;color:var(--fg);text-decoration:none;letter-spacing:-.02em;margin-right:8px}
-header nav{display:flex;gap:2px}
+header nav{display:flex;gap:2px;flex-wrap:wrap;min-width:0}
 header nav a{color:var(--mut);text-decoration:none;padding:5px 11px;border-radius:7px;font-size:14px}
 header nav a:hover{background:var(--bg)}
 header nav a.on{background:var(--bg);color:var(--fg);font-weight:600}
@@ -111,3 +111,9 @@ dialog h1{font-size:18px}
 .kv dt{color:var(--mut)}
 .kv dd{margin:0;overflow-wrap:anywhere}
 .empty{color:var(--mut);text-align:center;padding:22px}
+/* listes à choisir : dépôts GitHub, moteurs de bases */
+.picker{display:grid;gap:6px;max-height:320px;overflow:auto;margin:8px 0;padding:2px}
+.picker button{text-align:left;width:100%;display:block;padding:8px 11px}
+.picker button.on{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc)}
+.picker button strong{font-weight:600}
+.tag{display:inline-block;font-size:11.5px;color:var(--mut);border:1px solid var(--line);border-radius:99px;padding:0 7px;margin-left:6px;white-space:nowrap}

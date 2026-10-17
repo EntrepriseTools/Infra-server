@@ -40,6 +40,23 @@ export function mountAccount(ctx) {
     return ok(publicUser(u), 201);
   }, { public: true });
 
+  // ── « qui suis-je ? », sans échouer quand la réponse est « personne » ────
+  // Le tableau de bord appelle cette route au chargement : elle évite un 401 à
+  // chaque visite, et dit du même coup s'il faut créer le premier compte.
+  r.add('GET', '/api/session', ({ req }) => {
+    const who = auth.identify(req);
+    if (!who) return ok({ authenticated: false, setup_needed: store.countUsers() === 0, version: config.version });
+    return ok({
+      authenticated: true,
+      user: publicUser(who.user),
+      via: who.via,
+      csrf: who.session?.csrf ?? null,
+      roles: ROLE_NAMES.map((id) => ({ id, ...ROLES[id] })),
+      github: githubState(who.user),
+      version: config.version,
+    });
+  }, { public: true });
+
   // ── connexion ───────────────────────────────────────────────────────────
   r.add('POST', '/api/login', ({ body, req, res }) => {
     const ip = req.socket.remoteAddress;

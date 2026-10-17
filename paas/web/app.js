@@ -1,41 +1,86 @@
-// Le tableau de bord : une page, quatre vues (vue d'ensemble, service, activité,
-// système). Tout passe par l'API JSON — rien n'est rendu côté serveur.
+// Le tableau de bord : une page, un routeur par ancre, et des vues qui ne
+// parlent au serveur que par l'API JSON.
+//
+//   #/                     vue d'ensemble : la machine, les projets, l'activité
+//   #/projects/<id>        un projet : ses environnements, ses services, ses variables
+//   #/services/<id>/<tab>  un service (voir views.js)
+//   #/templates            le catalogue en un clic
+//   #/containers           tout ce que Docker fait tourner ici
+//   #/activity  #/system   l'histoire, et la machine
+//   #/account   #/users    mon compte, et les comptes (administrateur)
 import {
-  h, toast, act, field, dialog, api, download, followLog, getToken, setToken, setUnauthorizedHandler,
-  fmtBytes, fmtRate, fmtPct, fmtDur, ago, dateTime, clock, chart, VIZ,
-  stateBadge, deployBadge, levelDot, stateWord,
+  App, can, h, toast, act, field, dialog, formDialog, api, setCsrf, setUnauthorizedHandler,
+  fmtBytes, fmtPct, fmtDur, ago, dateTime, chart, VIZ, rangePicker,
+  stateBadge, stateWord, levelDot, copyBtn, confirmThen, kindIcon,
 } from './ui.js';
+import {
+  serviceView, serviceCard, eventLine, logDialog,
+  newServiceDialog, newDatabaseDialog, templatesDialog,
+} from './views.js';
 
 const $app = document.getElementById('app');
 const $nav = document.getElementById('nav');
-let cfg = {};
-let stoppers = [];          // flux et minuteries de la vue courante
-let range = localStorage.getItem('rail_range') || '1h';
+let stoppers = [];              // flux et minuteries de la vue courante
+const envChoisi = new Map();    // projet → environnement affiché
 
-const onLeave = (fn) => stoppers.push(fn);
+App.onLeave = (fn) => stoppers.push(fn);
+App.refreshIn = (ms) => { const t = setTimeout(App.render, ms); App.onLeave(() => clearTimeout(t)); };
+App.range = (() => { try { return localStorage.getItem('rail_range') || '1h'; } catch { return '1h'; } })();
 const leaveAll = () => { for (const f of stoppers) { try { f(); } catch { /* rien */ } } stoppers = []; };
-const refreshIn = (ms) => { const t = setTimeout(render, ms); onLeave(() => clearTimeout(t)); };
-const copy = (t) => navigator.clipboard?.writeText(t).then(() => toast('Copié'), () => toast('Copie impossible', true));
-const confirmThen = (question, fn) => act(async (ev) => { if (confirm(question)) await fn(ev); });
-const RANGES = ['15m', '1h', '6h', '24h', '7d'];
 
 // ── connexion ─────────────────────────────────────────────────────────────
-function logout() { setToken(''); render(); }
-setUnauthorizedHandler(() => setToken(''));
+setUnauthorizedHandler(() => { App.me = null; setCsrf(''); });
+
+async function logout() {
+  try { await api('POST', '/logout', {}); } catch { /* la session était déjà morte */ }
+  App.me = null; setCsrf('');
+  location.hash = '#/';
+  render();
+}
 document.getElementById('logout').onclick = logout;
 
-function loginView() {
-  const inp = h('input', { type: 'password', placeholder: 'Jeton d’administration', autocomplete: 'current-password', required: true, style: 'width:100%' });
-  const form = h('form', {
-    class: 'card login',
-    onsubmit: act(async (e) => { e.preventDefault(); setToken(inp.value.trim()); await api('GET', '/config'); render(); }),
-  },
-  h('h1', {}, '▲ Rail'),
-  h('p', { class: 'mut' }, 'Déployez et surveillez vos API et vos bases, sur votre serveur.'),
-  inp,
-  h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Entrer')));
+function loginView({ setupNeeded }) {
+  const login = h('input', { required: true, autocomplete: 'username', placeholder: 'identifiant', style: 'width:100%' });
+  const mdp = h('input', { type: 'password', required: true, autocomplete: setupNeeded ? 'new-password' : 'current-password', placeholder: 'mot de passe', style: 'width:100%' });
+  const jeton = h('input', { type: 'password', required: true, autocomplete: 'off', placeholder: 'jeton d’administration', style: 'width:100%' });
+
+  const entrer = act(async (e) => {
+    e.preventDefault();
+    const r = await api('POST', '/login', { login: login.value.trim(), password: mdp.value });
+    App.me = { user: r.user, csrf: r.csrf, via: 'session' };
+    setCsrf(r.csrf);
+    render();
+  });
+  const installer = act(async (e) => {
+    e.preventDefault();
+    // Le jeton d'administration ne sert qu'ici : il prouve qu'on est bien
+    // la personne qui a installé Rail, le temps de créer le premier compte.
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${jeton.value.trim()}` },
+      body: JSON.stringify({ login: login.value.trim(), password: mdp.value }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Erreur ${res.status}`);
+    toast('Compte créé — connectez-vous');
+    await entrer(e);
+  });
+
+  const form = h('form', { class: 'card login', onsubmit: setupNeeded ? installer : entrer },
+    h('h1', {}, '▲ Rail'),
+    setupNeeded
+      ? h('div', {},
+        h('p', { class: 'mut' }, 'Première ouverture : créez le compte administrateur. Le jeton d’administration est celui qu’a affiché l’installation (', h('span', { class: 'mono' }, 'RAIL_ADMIN_TOKEN'), ').'),
+        field('Jeton d’administration', jeton),
+        field('Identifiant', login, 'minuscules, chiffres, point, tiret'),
+        field('Mot de passe', mdp, '10 caractères au moins'))
+      : h('div', {},
+        h('p', { class: 'mut' }, 'Déployez et surveillez vos API, vos bases et vos tâches, sur votre serveur.'),
+        field('Identifiant', login),
+        field('Mot de passe', mdp)),
+    h('p', {}, h('button', { class: 'pri', type: 'submit' }, setupNeeded ? 'Créer le compte' : 'Entrer')));
   $app.replaceChildren(form);
-  inp.focus();
+  (setupNeeded ? jeton : login).focus();
 }
 
 // ── tuiles ────────────────────────────────────────────────────────────────
@@ -46,20 +91,90 @@ function tile(k, value, sub, ratio) {
     ratio == null ? null : h('div', { class: `bar${cls}` }, h('i', { style: `width:${Math.min(100, Math.round(ratio * 100))}%` })));
 }
 
-function serviceCard(s) {
-  const st = s.status?.state || 'unknown';
-  return h('a', { href: `#/services/${s.id}`, class: 'card tight', style: 'text-decoration:none;color:inherit;margin:0;display:block' },
-    h('div', { class: 'row sp' }, h('strong', {}, s.kind === 'database' ? `🗄 ${s.name}` : s.name), stateBadge(st)),
-    h('div', { class: 'mut mono trunc' }, s.kind === 'database' ? `${s.engine} · ${s.base_image}` : `${s.repo} · ${s.branch}`),
-    h('div', { class: 'row sp sm mut' },
-      h('span', {}, s.latest_deployment ? ['#', s.latest_deployment.number, ' ', deployBadge(s.latest_deployment.status), ' ', ago(s.latest_deployment.created_at)] : 'jamais déployé'),
-      h('span', {}, s.status?.sample?.cpu != null ? `${fmtPct(s.status.sample.cpu)} · ${fmtBytes(s.status.sample.mem)}` : '')));
+// ── un projet : pastilles d'environnement + grille de services ────────────
+function envPills(p, courant, { gerer = false } = {}) {
+  return h('div', { class: 'row' },
+    ...p.environments.map((e) => h('button', {
+      class: `sm${e.id === courant.id ? ' pri' : ''}`,
+      onclick: () => { envChoisi.set(p.id, e.name); render(); },
+    }, e.name, h('span', { class: 'mut' }, ` ${e.services.length}`))),
+    gerer && can('member') ? h('button', { class: 'sm', title: 'Nouvel environnement', onclick: () => newEnvDialog(p) }, '+ Environnement') : null);
 }
 
-const eventLine = (e) => h('li', {},
-  h('time', { datetime: e.at, title: dateTime(e.at) }, ago(e.at)),
-  levelDot(e.level),
-  e.service_id ? h('a', { href: `#/services/${e.service_id}` }, e.message) : h('span', {}, e.message));
+function newEnvDialog(p) {
+  const name = h('input', { required: true, placeholder: 'preprod', pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?' });
+  const copier = h('select', {}, h('option', { value: '' }, 'partir de rien'), p.environments.map((e) => h('option', { value: e.id }, `copier « ${e.name} » (${e.services.length} service(s))`)));
+  formDialog(`Nouvel environnement — ${p.name}`,
+    h('div', {},
+      h('div', { class: 'grid2' }, field('Nom', name), field('Contenu', copier)),
+      h('p', { class: 'mut sm' }, 'Copier un environnement recrée ses services et leurs variables, avec des adresses à lui (',
+        h('span', { class: 'mono' }, 'api-projet-preprod.' + (App.cfg.domain || '')), '). Les bases repartent vides, avec des identifiants neufs : aucune donnée n’est copiée.')),
+    async () => {
+      const e = await api('POST', `/projects/${p.id}/environments`, { name: name.value.trim(), copy_from: copier.value || null });
+      envChoisi.set(p.id, e.name);
+      toast(e.deploy_hint ? `Environnement créé — ${e.deploy_hint}` : 'Environnement créé');
+      render();
+    });
+}
+
+function projectSection(p, { detail = false } = {}) {
+  const envs = p.environments;
+  const voulu = envChoisi.get(p.id);
+  const env = envs.find((e) => e.name === voulu) || envs.find((e) => e.name === 'production') || envs[0];
+  const boutons = !can('member') ? [] : [
+    h('button', { class: 'sm pri', onclick: () => newServiceDialog(p, env) }, '+ Service'),
+    h('button', { class: 'sm', onclick: () => newDatabaseDialog(p, env) }, '+ Base de données'),
+    h('button', { class: 'sm', onclick: () => newServiceDialog(p, env, { kind: 'cron' }) }, '+ Tâche planifiée'),
+    h('button', { class: 'sm', onclick: () => templatesDialog(p, env) }, 'Modèles'),
+  ];
+  const titre = detail
+    ? h('h1', { style: 'margin:0' }, p.name)
+    : h('h2', { style: 'margin:0' }, h('a', { href: `#/projects/${p.id}`, style: 'color:inherit;text-decoration:none' }, p.name));
+  // Une section nommée : le repère du projet dans la page (et dans les tests).
+  return h('section', { class: 'projet', 'data-nom': p.name },
+    h('div', { class: 'row sp', style: detail ? '' : 'margin-top:26px' }, titre, h('div', { class: 'row' }, boutons)),
+    h('div', { class: 'row sp', style: 'margin:8px 0' }, envPills(p, env, { gerer: detail }),
+      detail && env.name !== 'production' && can('member')
+        ? h('button', { class: 'sm dng', onclick: confirmThen(`Supprimer l’environnement « ${env.name} » et ses ${env.services.length} service(s) ?`, async () => { await api('DELETE', `/environments/${env.id}`); envChoisi.delete(p.id); render(); }) }, `Supprimer « ${env.name} »`)
+        : null),
+    env.services.length
+      ? h('div', { class: 'grid' }, env.services.map(serviceCard))
+      : h('div', { class: 'card empty' }, 'Aucun service ici. Reliez un dépôt GitHub, déployez une image, ajoutez une base — ou partez d’un modèle.'),
+    detail ? sharedVarsCard(env) : null,
+    detail ? h('div', { class: 'card' },
+      h('h3', { style: 'color:var(--ko)' }, 'Zone dangereuse'),
+      h('p', { class: 'mut sm' }, 'Supprimer le projet supprime tous ses environnements, ses services, ses volumes et leurs données.'),
+      !can('member') ? null : h('button', { class: 'dng', onclick: confirmThen(`Supprimer le projet « ${p.name} » et tout ce qu’il contient ?`, async () => { await api('DELETE', `/projects/${p.id}`); location.hash = '#/'; }) }, 'Supprimer ce projet')) : null);
+}
+
+/** Les variables communes à tous les services d'un environnement. */
+function sharedVarsCard(env) {
+  const carte = h('div', { class: 'card' }, h('h3', {}, `Variables partagées — ${env.name}`), h('div', { class: 'mut sm' }, 'Chargement…'));
+  (async () => {
+    const vars = await api('GET', `/environments/${env.id}/variables`);
+    const rows = h('div', {});
+    const addRow = (k = '', v = '') => rows.append(h('div', { class: 'row', style: 'margin:6px 0' },
+      h('input', { class: 'k mono', placeholder: 'NOM', value: k, style: 'flex:1' }),
+      h('input', { class: 'v mono', placeholder: 'valeur', value: v, style: 'flex:2' }),
+      h('button', { class: 'dng sm', onclick: (e) => e.currentTarget.parentElement.remove() }, '✕')));
+    Object.entries(vars).forEach(([k, v]) => addRow(k, v));
+    carte.replaceChildren(
+      h('h3', {}, `Variables partagées — ${env.name}`),
+      h('p', { class: 'mut sm' }, 'Fournies à tous les services de cet environnement. Une variable du service remplace celle d’ici.'),
+      rows,
+      !can('member') ? null : h('div', { class: 'row' },
+        h('button', { onclick: () => addRow() }, '+ Variable'),
+        h('button', {
+          class: 'pri',
+          onclick: act(async () => {
+            const next = {};
+            for (const r of rows.children) { const k = r.querySelector('.k').value.trim(); if (k) next[k] = r.querySelector('.v').value; }
+            await api('PUT', `/environments/${env.id}/variables`, { variables: next });
+          }, 'Enregistré — redéployez les services pour appliquer'),
+        }, 'Enregistrer')));
+  })().catch((e) => carte.append(h('div', { class: 'erreur' }, e.message)));
+  return carte;
+}
 
 // ── vue d'ensemble ────────────────────────────────────────────────────────
 async function overviewView() {
@@ -69,8 +184,11 @@ async function overviewView() {
   const up = sys.states?.running || 0;
   const nodes = [
     h('div', { class: 'row sp' },
-      h('div', {}, h('h1', {}, 'Vue d’ensemble'), h('div', { class: 'mut' }, `${sys.projects} projet(s), ${sys.services} service(s) dont ${sys.databases} base(s) — ${sys.domain}`)),
-      h('button', { class: 'pri', onclick: () => newProjectDialog() }, '+ Nouveau projet')),
+      h('div', {}, h('h1', {}, 'Vue d’ensemble'),
+        h('div', { class: 'mut' }, `${sys.projects} projet(s), ${sys.services} service(s) dont ${sys.databases} base(s) et ${sys.jobs} tâche(s) — ${sys.domain}`)),
+      !can('member') ? null : h('div', { class: 'row' },
+        h('a', { class: 'btn', href: '#/templates' }, 'Catalogue'),
+        h('button', { class: 'pri', onclick: () => newProjectDialog() }, '+ Nouveau projet'))),
     h('div', { class: 'tiles' },
       tile('Processeur', fmtPct(sys.cpu), `${sys.cpus} cœurs · charge ${(sys.load1 ?? 0).toFixed(2)}`, sys.cpu == null ? null : sys.cpu / 100),
       tile('Mémoire', fmtBytes(sys.mem), `sur ${fmtBytes(sys.mem_total)}`, sys.mem_total ? sys.mem / sys.mem_total : null),
@@ -82,23 +200,64 @@ async function overviewView() {
     })),
   ];
 
-  for (const p of o.projects) {
-    nodes.push(h('div', { class: 'row sp', style: 'margin-top:26px' },
-      h('h2', { style: 'margin:0' }, p.name),
-      h('div', { class: 'row' },
-        h('button', { class: 'sm', onclick: () => newServiceDialog(p) }, '+ Service'),
-        h('button', { class: 'sm', onclick: () => newDatabaseDialog(p) }, '+ Base de données'),
-        h('button', { class: 'sm dng', onclick: confirmThen(`Supprimer le projet « ${p.name} », ses services, ses bases et leurs données ?`, async () => { await api('DELETE', `/projects/${p.id}`); render(); }) }, 'Supprimer'))));
-    nodes.push(p.services.length
-      ? h('div', { class: 'grid' }, p.services.map(serviceCard))
-      : h('div', { class: 'card empty' }, 'Aucun service. Reliez un dépôt GitHub, ou ajoutez une base de données.'));
+  for (const p of o.projects) nodes.push(projectSection(p));
+  if (!o.projects.length) {
+    nodes.push(h('div', { class: 'card' },
+      h('h3', {}, 'Commencer'),
+      h('p', {}, 'Créez un projet, puis reliez un dépôt GitHub — ou partez d’un modèle prêt à l’emploi.'),
+      !can('member') ? null : h('p', { class: 'row' },
+        h('button', { class: 'pri', onclick: () => newProjectDialog() }, '+ Nouveau projet'),
+        h('a', { class: 'btn', href: '#/templates' }, 'Voir le catalogue'))));
   }
-  if (!o.projects.length) nodes.push(h('div', { class: 'card empty' }, 'Aucun projet. Créez-en un, puis ajoutez-y un service relié à un dépôt GitHub.'));
 
   nodes.push(h('div', { class: 'row sp', style: 'margin-top:26px' }, h('h2', { style: 'margin:0' }, 'Activité'), h('a', { href: '#/activity' }, 'Tout voir →')));
   nodes.push(h('div', { class: 'card' }, o.events.length ? h('ul', { class: 'feed' }, o.events.slice(0, 8).map(eventLine)) : h('div', { class: 'empty' }, 'Rien pour l’instant.')));
   $app.replaceChildren(...nodes);
-  refreshIn(10000);
+  App.refreshIn(10000);
+}
+
+async function projectView(id) {
+  const p = await api('GET', `/projects/${id}`);
+  $app.replaceChildren(h('p', {}, h('a', { href: '#/' }, '← Vue d’ensemble')), projectSection(p, { detail: true }));
+  App.refreshIn(15000);
+}
+
+function newProjectDialog() {
+  const name = h('input', { required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?', placeholder: 'mon-projet' });
+  formDialog('Nouveau projet', field('Nom (minuscules, chiffres, tirets)', name, 'Un environnement « production » est créé avec le projet.'),
+    async () => { const p = await api('POST', '/projects', { name: name.value }); location.hash = `#/projects/${p.id}`; });
+}
+
+// ── catalogue de modèles ──────────────────────────────────────────────────
+async function templatesView() {
+  const projets = await api('GET', '/projects');
+  const lancer = (t) => async () => {
+    if (!can('member')) return;
+    if (!projets.length) { toast('Créez d’abord un projet', true); newProjectDialog(); return; }
+    const choix = h('select', {}, projets.flatMap((p) => p.environments.map((e) => h('option', { value: `${p.id}|${e.id}` }, `${p.name} / ${e.name}`))));
+    const prefix = h('input', { placeholder: 'facultatif', pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?' });
+    formDialog(`Déployer ${t.label}`,
+      h('div', {},
+        h('p', {}, t.about),
+        h('p', { class: 'mut sm' }, 'Services créés : ', h('span', { class: 'mono' }, t.services.map((s) => `${s.name} (${s.what})`).join(' + '))),
+        h('div', { class: 'grid2' }, field('Où', choix), field('Préfixe des noms', prefix, 'Pour déployer ce modèle deux fois'))),
+      async () => {
+        const [pid, eid] = choix.value.split('|');
+        toast(`Déploiement de ${t.label}…`);
+        const r = await api('POST', `/projects/${pid}/templates`, { template: t.id, environment_id: eid, prefix: prefix.value.trim() || null });
+        location.hash = `#/services/${r.main?.id ?? r.services[0].id}/deployments`;
+      }, 'Déployer');
+  };
+  $app.replaceChildren(
+    h('div', { class: 'row sp' }, h('h1', {}, 'Catalogue'), h('a', { href: '#/' }, '← Vue d’ensemble')),
+    h('p', { class: 'mut' }, 'Des piles complètes, déployées en un clic : Rail crée les services, engendre les secrets, câble les variables entre eux et lance la construction. Les versions d’images restent modifiables ensuite.'),
+    h('div', { class: 'grid' }, (App.cfg.templates || []).map((t) => h('div', { class: 'card' },
+      h('div', { class: 'row sp' }, h('strong', {}, t.label), h('span', { class: 'tag' }, (t.tags || [])[0] || '')),
+      h('div', { class: 'sm' }, t.tagline),
+      h('p', { class: 'mut sm' }, t.about),
+      h('div', { class: 'mut sm mono trunc', title: t.services.map((s) => s.what).join(' + ') }, t.services.map((s) => s.name).join(' + ')),
+      !can('member') ? null : h('p', { style: 'margin-bottom:0' }, h('button', { class: 'pri sm', onclick: act(lancer(t)) }, 'Déployer'))))),
+  );
 }
 
 // ── tous les conteneurs de la machine ─────────────────────────────────────
@@ -117,7 +276,7 @@ async function containersView() {
       h('td', { class: 'mono sm' }, m.cpu != null ? fmtPct(m.cpu) : '—'),
       h('td', { class: 'mono sm' }, m.mem != null ? fmtBytes(m.mem) : '—'),
       h('td', { class: 'mut sm trunc', style: 'max-width:200px', title: c.ports }, c.ports || '—'),
-      h('td', { class: 'mut sm' }, c.service ? `${c.service.project}/${c.service.name}` : c.control_plane ? 'plan de contrôle' : 'hors Rail'),
+      h('td', { class: 'mut sm' }, c.service ? `${c.service.project}/${c.service.environment}/${c.service.name}` : c.control_plane ? 'plan de contrôle' : 'hors Rail'),
       h('td', { class: 'actions' },
         h('button', { class: 'sm', onclick: () => logDialog(`Journal — ${c.name}`, `/containers/${encodeURIComponent(c.name)}/logs?follow=1&tail=300`) }, 'Logs'),
         c.service || c.control_plane ? null : h('button', { class: 'sm', onclick: () => containerDialog(c) }, 'Détail')));
@@ -130,7 +289,7 @@ async function containersView() {
       h('tbody', {}, liste.map(ligne)))),
     aRail.length === liste.length ? null : h('p', { class: 'mut sm' }, 'Les conteneurs « hors Rail » gardent leur configuration : Rail les observe, les journalise et peut les redémarrer, mais ne les redéploie pas.'),
   );
-  refreshIn(10000);
+  App.refreshIn(10000);
 }
 
 async function containerDialog(c) {
@@ -140,7 +299,7 @@ async function containerDialog(c) {
     onclick: act(async () => { await api('POST', `/containers/${encodeURIComponent(c.name)}/${nom}`); dlg.close(); render(); }, `${etiquette} : fait`),
   }, etiquette);
   let m = { points: [] };
-  try { m = await api('GET', `/containers/${encodeURIComponent(c.name)}/metrics?range=${range}`); } catch { /* pas de mesures */ }
+  try { m = await api('GET', `/containers/${encodeURIComponent(c.name)}/metrics?range=${App.range}`); } catch { /* pas de mesures */ }
   corps.replaceChildren(
     h('dl', { class: 'kv' },
       h('dt', {}, 'Image'), h('dd', { class: 'mono' }, c.image),
@@ -148,12 +307,12 @@ async function containerDialog(c) {
       h('dt', {}, 'Ports'), h('dd', { class: 'mono' }, c.ports || '—'),
       h('dt', {}, 'Réseaux'), h('dd', { class: 'mono' }, c.networks || '—'),
       h('dt', {}, 'Créé'), h('dd', {}, c.created || '—')),
-    h('div', { style: 'margin-top:14px' }, chart({ points: m.points, series: [{ key: 'cpu', label: 'Processeur', color: VIZ.s1 }], format: fmtPct, title: `Processeur (${m.range || range})` })),
-    h('div', {}, chart({ points: m.points, series: [{ key: 'mem', label: 'Mémoire', color: VIZ.s1 }], format: fmtBytes, title: `Mémoire (${m.range || range})` })),
+    h('div', { style: 'margin-top:14px' }, chart({ points: m.points, series: [{ key: 'cpu', label: 'Processeur', color: VIZ.s1 }], format: fmtPct, title: `Processeur (${m.range || App.range})` })),
+    h('div', {}, chart({ points: m.points, series: [{ key: 'mem', label: 'Mémoire', color: VIZ.s1 }], format: fmtBytes, title: `Mémoire (${m.range || App.range})` })),
     h('p', { class: 'row', style: 'margin-top:14px' },
       h('button', { class: 'sm', onclick: () => logDialog(`Journal — ${c.name}`, `/containers/${encodeURIComponent(c.name)}/logs?follow=1&tail=300`) }, 'Logs'),
-      c.state === 'running' ? geste('restart', 'Redémarrer') : null,
-      c.state === 'running' ? geste('stop', 'Arrêter') : geste('start', 'Démarrer')),
+      !can('member') ? null : c.state === 'running' ? geste('restart', 'Redémarrer') : null,
+      !can('member') ? null : c.state === 'running' ? geste('stop', 'Arrêter') : geste('start', 'Démarrer')),
   );
 }
 
@@ -165,16 +324,16 @@ async function activityView() {
     h('button', { class: `sm${eventLevel === v ? ' pri' : ''}`, onclick: () => { eventLevel = v; render(); } }, l)));
   $app.replaceChildren(
     h('div', { class: 'row sp' }, h('h1', {}, 'Activité'), filter),
-    h('p', { class: 'mut' }, 'Déploiements, arrêts, redémarrages, pannes détectées : les 200 derniers événements.'),
+    h('p', { class: 'mut' }, 'Déploiements, arrêts, redémarrages, pannes détectées, connexions et changements de comptes : les 200 derniers événements, avec qui les a demandés.'),
     h('div', { class: 'card' }, events.length ? h('ul', { class: 'feed' }, events.map(eventLine)) : h('div', { class: 'empty' }, 'Aucun événement.')),
   );
-  refreshIn(15000);
+  App.refreshIn(15000);
 }
 
 // ── système ───────────────────────────────────────────────────────────────
 async function systemView() {
   const sys = await api('GET', '/system');
-  const m = await api('GET', `/system/metrics?range=${range}`);
+  const m = await api('GET', `/system/metrics?range=${App.range}`);
   const df = sys.df || {};
   const dfRow = (label, k) => (df[k] ? h('tr', {}, h('td', {}, label), h('td', { class: 'mono' }, `${df[k].active} / ${df[k].count}`), h('td', { class: 'mono' }, fmtBytes(df[k].size)), h('td', { class: 'mono' }, fmtBytes(df[k].reclaimable))) : null);
   $app.replaceChildren(
@@ -191,8 +350,8 @@ async function systemView() {
       h('h3', {}, 'Place occupée par Docker'),
       h('table', {}, h('thead', {}, h('tr', {}, ['', 'Actifs / total', 'Taille', 'Récupérable'].map((t) => h('th', {}, t)))),
         h('tbody', {}, dfRow('Images', 'images'), dfRow('Conteneurs', 'containers'), dfRow('Volumes', 'local volumes'), dfRow('Cache de construction', 'build cache'))),
-      h('p', { class: 'row' },
-        h('button', { onclick: act(async () => { const r = await api('POST', '/system/prune'); toast(r.output || 'Nettoyé'); render(); }) }, 'Nettoyer les images orphelines'),
+      !can('admin') ? null : h('p', { class: 'row' },
+        h('button', { onclick: act(async () => { const r = await api('POST', '/system/prune', {}); toast(r.output || 'Nettoyé'); render(); }) }, 'Nettoyer les images orphelines'),
         h('span', { class: 'mut sm' }, 'Ne touche ni aux images en service, ni aux volumes de vos bases.'))),
     h('div', { class: 'card' },
       h('h3', {}, 'Installation'),
@@ -201,464 +360,190 @@ async function systemView() {
         h('dt', {}, 'Node'), h('dd', { class: 'mono' }, sys.node),
         h('dt', {}, 'Docker'), h('dd', { class: 'mono' }, sys.docker || 'inconnu'),
         h('dt', {}, 'Domaine de base'), h('dd', { class: 'mono' }, sys.domain),
-        h('dt', {}, 'Tableau de bord'), h('dd', { class: 'mono' }, cfg.dashboardHost || ''),
+        h('dt', {}, 'Tableau de bord'), h('dd', { class: 'mono' }, App.cfg.dashboardHost || ''),
+        h('dt', {}, 'Mode TLS'), h('dd', { class: 'mono' }, App.cfg.tls || '?'),
+        h('dt', {}, 'Ports TCP exposables'), h('dd', { class: 'mono' }, `${App.cfg.tcp_ports?.from}–${App.cfg.tcp_ports?.to}`),
+        h('dt', {}, 'Comptes'), h('dd', {}, `${sys.users} compte(s)`),
         h('dt', {}, 'Alertes sortantes'), h('dd', {}, sys.alerts ? 'activées (RAIL_NOTIFY_URL)' : 'désactivées — renseignez RAIL_NOTIFY_URL dans .env'))),
   );
-  refreshIn(15000);
+  App.refreshIn(15000);
 }
 
-function rangePicker() {
-  return h('div', { class: 'row' }, RANGES.map((r) => h('button', {
-    class: `sm${range === r ? ' pri' : ''}`,
-    onclick: () => { range = r; localStorage.setItem('rail_range', r); render(); },
-  }, r)));
-}
-
-// ── création ──────────────────────────────────────────────────────────────
-function formDialog(title, content, onSubmit, submitLabel = 'Créer') {
-  const form = h('form', { method: 'dialog', onsubmit: act(async (e) => { e.preventDefault(); await onSubmit(); dlg.close(); }) },
-    content, h('p', { class: 'row' }, h('button', { class: 'pri', type: 'submit' }, submitLabel), h('button', { type: 'button', onclick: () => dlg.close() }, 'Annuler')));
-  const dlg = dialog(title, form);
-  form.querySelector('input,select')?.focus();
-  return dlg;
-}
-
-function newProjectDialog() {
-  const name = h('input', { required: true, pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?', placeholder: 'mon-projet' });
-  formDialog('Nouveau projet', field('Nom (minuscules, chiffres, tirets)', name),
-    async () => { await api('POST', '/projects', { name: name.value }); render(); });
-}
-
-function newServiceDialog(p) {
-  const f = {
-    name: h('input', { required: true, placeholder: 'api' }),
-    repo: h('input', { required: true, placeholder: 'propriétaire/dépôt' }),
-    branch: h('input', { value: 'main' }),
-    root_dir: h('input', { value: '.' }),
-    port: h('input', { type: 'number', value: '3000', min: 1, max: 65535 }),
-    healthcheck_path: h('input', { placeholder: '/health (facultatif)' }),
-    github_token: h('input', { type: 'password', placeholder: 'dépôt privé : jeton « Contents: read »', autocomplete: 'off' }),
-  };
-  formDialog(`Nouveau service — ${p.name}`,
-    h('div', {},
-      h('div', { class: 'grid2' }, field('Nom', f.name), field('Dépôt GitHub', f.repo), field('Branche', f.branch), field('Dossier racine', f.root_dir), field('Port de l’API', f.port), field('Chemin de santé', f.healthcheck_path)),
-      field('Jeton GitHub', f.github_token),
-      h('p', { class: 'mut sm' }, 'Sans Dockerfile, Rail détecte Node, Python, Go ou Java et construit pour vous.')),
-    async () => {
-      const s = await api('POST', `/projects/${p.id}/services`, {
-        name: f.name.value, repo: f.repo.value, branch: f.branch.value, root_dir: f.root_dir.value,
-        port: +f.port.value, healthcheck_path: f.healthcheck_path.value || null, github_token: f.github_token.value || null,
-      });
-      location.hash = `#/services/${s.id}`;
-    });
-}
-
-function newDatabaseDialog(p) {
-  const engine = h('select', {}, (cfg.engines || []).map((e) => h('option', { value: e.id }, `${e.label} — ${e.image}`)));
-  const name = h('input', { required: true, placeholder: 'base', value: 'base' });
-  formDialog(`Nouvelle base de données — ${p.name}`,
-    h('div', {},
-      h('div', { class: 'grid2' }, field('Moteur', engine), field('Nom', name)),
-      h('p', { class: 'mut sm' }, 'Rail engendre les identifiants, crée un volume persistant, et démarre la base sur le réseau privé. Les autres services s’y branchent avec ', h('span', { class: 'mono' }, '${{nom.DATABASE_URL}}'), '.')),
-    async () => {
-      const s = await api('POST', `/projects/${p.id}/databases`, { engine: engine.value, name: name.value });
-      location.hash = `#/services/${s.id}`;
-    });
-}
-
-// ── un service ────────────────────────────────────────────────────────────
-const TABS_APP = [['apercu', 'Aperçu'], ['deployments', 'Déploiements'], ['logs', 'Logs'], ['variables', 'Variables'], ['domains', 'Domaines'], ['settings', 'Réglages']];
-const TABS_DB = [['apercu', 'Aperçu'], ['sql', 'Requêtes'], ['deployments', 'Déploiements'], ['logs', 'Logs'], ['variables', 'Connexion'], ['settings', 'Réglages']];
-
-async function serviceView(id, tab) {
-  const s = await api('GET', `/services/${id}`);
-  const isDb = s.kind === 'database';
-  const parleSql = isDb && (cfg.engines || []).find((x) => x.id === s.engine)?.sql;
-  const tabs = (isDb ? TABS_DB : TABS_APP).filter(([k]) => k !== 'sql' || parleSql);
-  if (!tabs.some(([k]) => k === tab)) tab = 'apercu';
-  const state = s.status?.state || 'unknown';
-  const stopped = s.desired_state === 'stopped';
-
-  const actions = h('div', { class: 'row' },
-    stateBadge(state),
-    isDb ? null : h('button', { class: 'pri', onclick: act(async () => { await api('POST', `/services/${id}/deploy`, {}); go(id, 'deployments'); }, 'Déploiement lancé') }, 'Déployer'),
-    s.active_deployment ? h('button', { onclick: act(async () => { await api('POST', `/services/${id}/redeploy`); go(id, 'deployments'); }, 'Redéploiement lancé') }, 'Redéployer') : null,
-    s.active_deployment && !stopped ? h('button', { onclick: act(async () => { await api('POST', `/services/${id}/restart`); render(); }, 'Redémarré') }, 'Redémarrer') : null,
-    stopped
-      ? h('button', { onclick: act(async () => { await api('POST', `/services/${id}/start`); render(); }, 'Démarré') }, 'Démarrer')
-      : h('button', { onclick: confirmThen(`Arrêter « ${s.name} » ? Le service ne répondra plus jusqu’à son redémarrage.`, async () => { await api('POST', `/services/${id}/stop`); render(); }) }, 'Arrêter'));
-
-  const head = h('div', {},
-    h('div', { class: 'row sp' },
-      h('div', {},
-        h('h1', {}, isDb ? `🗄 ${s.name}` : s.name),
-        h('div', { class: 'mut mono' }, `${s.project_name} / ${s.name} · `, isDb ? `${s.engine} ${s.base_image}` : `${s.repo} · ${s.branch}`)),
-      actions),
-    s.url ? h('p', {}, '🌐 ', h('a', { href: s.url, target: '_blank', rel: 'noopener' }, s.url)) : null,
-    isDb ? h('p', { class: 'sm' }, 'Réseau privé : ', h('span', { class: 'mono' }, `${s.private_host}:${s.port}`)) : null);
-
-  const tabsEl = h('div', { class: 'tabs', role: 'tablist' }, tabs.map(([k, l]) =>
-    h('button', { role: 'tab', 'aria-selected': String(tab === k), class: tab === k ? 'on' : '', onclick: () => go(id, k) }, l)));
-  const body = h('div', {});
-  $app.replaceChildren(h('p', {}, h('a', { href: '#/' }, '← Vue d’ensemble')), head, tabsEl, body);
-
-  if (tab === 'apercu') await overviewTab(body, s);
-  if (tab === 'sql') await sqlTab(body, s);
-  if (tab === 'deployments') await deploymentsTab(body, s);
-  if (tab === 'logs') logsTab(body, s);
-  if (tab === 'variables') await variablesTab(body, s);
-  if (tab === 'domains') domainsTab(body, s);
-  if (tab === 'settings') settingsTab(body, s);
-}
-const go = (id, tab) => { location.hash = `#/services/${id}/${tab}`; };
-
-async function overviewTab(body, s) {
-  const [m, events] = await Promise.all([
-    api('GET', `/services/${s.id}/metrics?range=${range}`),
-    api('GET', `/events?service_id=${s.id}&limit=8`),
+// ── mon compte ────────────────────────────────────────────────────────────
+async function accountView() {
+  const me = await api('GET', '/me');
+  App.me = me; setCsrf(me.csrf);
+  const [tokens, sessions] = await Promise.all([
+    api('GET', '/me/tokens').catch(() => []),
+    api('GET', '/me/sessions').catch(() => []),
   ]);
-  const st = s.status || {};
-  const dep = s.active_deployment;
-  const since = st.startedAt || st.since;
-  body.append(
-    h('div', { class: 'tiles' },
-      tile('État', stateWord(st.state || 'unknown'), since ? `depuis ${ago(since).replace('il y a ', '')}` : ''),
-      tile('Disponibilité', m.uptime == null ? '—' : `${(m.uptime * 100).toFixed(1)} %`, `sur ${m.range}`),
-      tile('Processeur', fmtPct(m.current?.cpu), `limite ${m.limits.cpus} cœur(s)`, m.current?.cpu == null ? null : m.current.cpu / (100 * m.limits.cpus)),
-      tile('Mémoire', fmtBytes(m.current?.mem), `limite ${m.limits.memory_mb} Mo`, m.current?.mem == null ? null : m.current.mem / (m.limits.memory_mb * 1024 * 1024)),
-      tile('Redémarrages', String(st.restarts ?? 0), 'depuis la création du conteneur')),
-    h('div', { class: 'row sp' }, h('h2', { style: 'margin:0' }, 'Mesures'), rangePicker()),
-    h('div', { class: 'card' }, chart({ points: m.points, series: [{ key: 'cpu', label: 'Processeur', color: VIZ.s1 }], format: fmtPct, title: `Processeur (${m.range})`, limit: m.limits.cpus * 100, limitLabel: 'limite' })),
-    h('div', { class: 'card' }, chart({ points: m.points, series: [{ key: 'mem', label: 'Mémoire', color: VIZ.s1 }], format: fmtBytes, title: `Mémoire (${m.range})`, limit: m.limits.memory_mb * 1024 * 1024, limitLabel: 'limite' })),
-    h('div', { class: 'card' }, chart({
-      points: m.points,
-      series: [{ key: 'rx', label: 'Entrant', color: VIZ.s1 }, { key: 'tx', label: 'Sortant', color: VIZ.s2 }],
-      format: fmtRate, title: `Réseau (${m.range})`,
-    })),
+  const actuel = h('input', { type: 'password', autocomplete: 'current-password' });
+  const neuf = h('input', { type: 'password', autocomplete: 'new-password' });
+  const jeton = h('input', { type: 'password', placeholder: 'github_pat_… ou ghp_…', autocomplete: 'off', style: 'flex:1' });
+  const partage = h('input', { type: 'checkbox', style: 'width:auto' });
+  const nomJeton = h('input', { placeholder: 'mon-portable', pattern: '[a-z0-9]([a-z0-9\\-]{0,28}[a-z0-9])?' });
+
+  $app.replaceChildren(
+    h('h1', {}, 'Mon compte'),
     h('div', { class: 'card' },
-      h('h3', {}, 'Déploiement en service'),
-      dep ? h('dl', { class: 'kv' },
-        h('dt', {}, 'Numéro'), h('dd', {}, `#${dep.number} (${dep.trigger})`),
-        h('dt', {}, 'Image'), h('dd', { class: 'mono trunc' }, dep.image || '—'),
-        h('dt', {}, 'Commit'), h('dd', { class: 'mono' }, dep.commit_sha ? `${dep.commit_sha.slice(0, 10)} ${dep.commit_message || ''}` : '—'),
-        h('dt', {}, 'Conteneur'), h('dd', { class: 'mono' }, dep.container || '—'),
-        h('dt', {}, 'Déployé'), h('dd', {}, `${dateTime(dep.finished_at || dep.created_at)} (${ago(dep.finished_at || dep.created_at)})`),
-        ...(s.volume ? [h('dt', {}, 'Volume'), h('dd', { class: 'mono' }, `${s.volume.name} → ${s.volume.path}`)] : []))
-        : h('div', { class: 'empty' }, 'Aucun déploiement en service.')),
-    h('div', { class: 'card' }, h('h3', {}, 'Activité du service'),
-      events.length ? h('ul', { class: 'feed' }, events.map(eventLine)) : h('div', { class: 'empty sm' }, 'Rien pour l’instant.')),
-  );
-  refreshIn(8000);
-}
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Identifiant'), h('dd', { class: 'mono' }, me.user.login),
+        h('dt', {}, 'Rôle'), h('dd', {}, `${me.user.role_label} — ${(me.roles.find((r) => r.id === me.user.role) || {}).help || ''}`),
+        h('dt', {}, 'Accès en cours'), h('dd', {}, me.via === 'root' ? 'jeton d’administration (.env)' : me.via === 'token' ? 'jeton d’API' : 'session du navigateur'),
+        h('dt', {}, 'Dernière venue'), h('dd', {}, me.user.last_seen_at ? dateTime(me.user.last_seen_at) : '—')),
+      me.user.must_change_password ? h('p', { class: 'erreur' }, 'Votre mot de passe a été défini par un administrateur : changez-le maintenant.') : null),
 
-async function deploymentsTab(body, s) {
-  const deps = await api('GET', `/services/${s.id}/deployments`);
-  if (!deps.length) {
-    body.append(h('div', { class: 'card empty' }, 'Aucun déploiement. Cliquez sur « Déployer », ou installez le webhook (Réglages) pour déployer à chaque push.'));
-    return;
-  }
-  const busy = deps.some((d) => ['queued', 'building', 'deploying'].includes(d.status));
-  body.append(h('div', { class: 'card' }, h('table', {},
-    h('thead', {}, h('tr', {}, ['#', 'Statut', 'Commit', 'Durée', 'Quand', ''].map((t) => h('th', {}, t)))),
-    h('tbody', {}, deps.map((d) => {
-      const dur = d.started_at && d.finished_at ? Math.round((new Date(d.finished_at) - new Date(d.started_at)) / 1000) : null;
-      return h('tr', {},
-        h('td', { class: 'mono' }, d.number),
-        h('td', {}, deployBadge(d.status), d.error ? h('div', { class: 'mut sm' }, d.error) : null, d.id === s.active_deployment_id ? h('div', { class: 'sm s-ok' }, 'en service') : null),
-        h('td', {}, h('span', { class: 'mono' }, (d.commit_sha || '').slice(0, 7)), ' ', d.commit_message || '',
-          !['push', 'manual'].includes(d.trigger) ? h('span', { class: 'mut' }, ` (${d.trigger === 'rollback' ? 'retour arrière' : 'redéploiement'})`) : ''),
-        h('td', { class: 'mut sm' }, dur == null ? '—' : fmtDur(dur)),
-        h('td', { class: 'mut sm' }, ago(d.created_at)),
-        h('td', { class: 'actions' },
-          h('button', { class: 'sm', onclick: () => logDialog(`Déploiement #${d.number}`, `/deployments/${d.id}/logs?follow=1`) }, 'Logs'),
-          ['success', 'removed'].includes(d.status) && d.id !== s.active_deployment_id && d.image
-            ? h('button', { class: 'sm', onclick: confirmThen(`Remettre le déploiement #${d.number} en service ?`, async () => { await api('POST', `/deployments/${d.id}/rollback`); render(); }) }, 'Revenir ici') : null,
-          ['queued', 'building', 'deploying'].includes(d.status)
-            ? h('button', { class: 'sm dng', onclick: act(async () => { await api('POST', `/deployments/${d.id}/cancel`); render(); }) }, 'Annuler') : null));
-    })))));
-  if (busy) refreshIn(2500);
-}
-
-function logDialog(title, path) {
-  const pre = h('pre', { class: 'log' }, 'Chargement…');
-  const dlg = dialog(title, pre, { wide: true });
-  const stop = followLog(path, pre);
-  dlg.addEventListener('close', stop);
-}
-
-function logsTab(body, s) {
-  if (!s.active_deployment) { body.append(h('div', { class: 'card empty' }, 'Aucun conteneur en service : déployez d’abord.')); return; }
-  let buf = '';
-  const pre = h('pre', { class: 'log' }, 'Chargement…');
-  const filter = h('input', { placeholder: 'filtrer (texte simple)', style: 'flex:1' });
-  const apply = () => {
-    const q = filter.value.toLowerCase();
-    pre.textContent = q ? buf.split('\n').filter((l) => l.toLowerCase().includes(q)).join('\n') : buf;
-    pre.scrollTop = pre.scrollHeight;
-  };
-  filter.oninput = apply;
-  body.append(h('div', { class: 'card' },
-    h('div', { class: 'row' }, filter,
-      h('button', { onclick: () => { const u = URL.createObjectURL(new Blob([buf], { type: 'text/plain' })); const a = h('a', { href: u, download: `${s.name}.log` }); document.body.append(a); a.click(); a.remove(); } }, 'Télécharger'),
-      h('span', { class: 'mut sm' }, 'en direct')),
-    pre));
-  const stop = followLog(`/services/${s.id}/logs?follow=1&tail=400`, pre, { onLine: (t) => { buf += t; if (filter.value) apply(); } });
-  onLeave(stop);
-}
-
-// ── console SQL ───────────────────────────────────────────────────────────
-const DANGER = /\b(drop|truncate|delete|alter|update|grant|revoke)\b/i;
-const histoire = {
-  lire: () => { try { return JSON.parse(localStorage.getItem('rail_sql') || '{}'); } catch { return {}; } },
-  pour: (id) => (histoire.lire()[id] || []),
-  ajouter(id, sql) {
-    const tout = histoire.lire();
-    tout[id] = [sql, ...(tout[id] || []).filter((x) => x !== sql)].slice(0, 15);
-    try { localStorage.setItem('rail_sql', JSON.stringify(tout)); } catch { /* navigation privée */ }
-  },
-};
-
-async function sqlTab(body, s) {
-  const editeur = h('textarea', { spellcheck: 'false', placeholder: 'SELECT * FROM ma_table LIMIT 100;' });
-  const lecture = h('input', { type: 'checkbox', checked: true, style: 'width:auto' });
-  const sortie = h('div', {});
-  const infos = h('span', { class: 'mut sm' });
-  const liste = h('div', { class: 'card tight tables' }, h('div', { class: 'mut sm' }, 'Chargement…'));
-
-  const executer = act(async () => {
-    const sql = editeur.value.trim();
-    if (!sql) return;
-    if (!lecture.checked && DANGER.test(sql) && !confirm('Cette requête peut modifier ou supprimer des données. Continuer ?')) return;
-    infos.textContent = 'Exécution…';
-    sortie.replaceChildren();
-    try {
-      const r = await api('POST', `/services/${s.id}/query`, { sql, read_only: lecture.checked });
-      histoire.ajouter(s.id, sql);
-      infos.textContent = `${r.message ? r.message : `${r.total ?? r.rows.length} ligne(s)`} · ${r.ms} ms${r.read_only ? ' · lecture seule' : ''}`;
-      sortie.replaceChildren(resultat(r, s));
-      if (!lecture.checked) rafraichirTables();
-    } catch (e) {
-      infos.textContent = '';
-      sortie.replaceChildren(h('div', { class: 'erreur' }, e.message));
-      throw e;
-    }
-  });
-  editeur.addEventListener('keydown', (ev) => { if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') { ev.preventDefault(); executer({ currentTarget: null }); } });
-
-  const lancer = (sql) => { editeur.value = sql; executer({ currentTarget: null }); };
-  async function rafraichirTables() {
-    try {
-      const t = await api('GET', `/services/${s.id}/tables`);
-      const lignes = t.rows.map((r) => {
-        const nom = r.length > 1 && r[0] !== 'public' ? `${r[0]}.${r[1]}` : r[1];
-        return h('button', { title: r[2] ? `taille ${r[2]}` : '', onclick: () => lancer(`SELECT * FROM ${nom} LIMIT 100;`) }, nom, r[2] ? h('span', { class: 'mut' }, ` · ${r[2]}`) : null);
-      });
-      liste.replaceChildren(h('div', { class: 'mut sm', style: 'padding:2px 8px 6px' }, lignes.length ? `${lignes.length} table(s)` : 'aucune table'), ...lignes);
-    } catch (e) { liste.replaceChildren(h('div', { class: 'mut sm' }, e.message)); }
-  }
-
-  const passe = histoire.pour(s.id);
-  const rappel = h('select', { style: 'max-width:240px', onchange: (ev) => { if (ev.target.value) { editeur.value = ev.target.value; ev.target.selectedIndex = 0; } } },
-    h('option', { value: '' }, 'Requêtes récentes…'), passe.map((q) => h('option', { value: q }, q.replace(/\s+/g, ' ').slice(0, 70))));
-
-  body.append(h('div', { class: 'sql' },
-    h('div', {}, h('h3', {}, 'Tables'), liste,
-      h('p', { class: 'mut sm' }, 'Un clic ouvre les 100 premières lignes.')),
-    h('div', {},
-      h('div', { class: 'card' },
-        editeur,
-        h('div', { class: 'row sp', style: 'margin-top:10px' },
-          h('div', { class: 'row' },
-            h('button', { class: 'pri', onclick: executer }, 'Exécuter'),
-            h('label', { class: 'row', style: 'color:var(--fg);margin:0' }, lecture, 'Lecture seule'),
-            passe.length ? rappel : null),
-          h('span', { class: 'mut sm' }, 'Ctrl/⌘ + Entrée · une requête à la fois')),
-        h('p', { class: 'mut sm', style: 'margin-bottom:0' }, 'Décochez « lecture seule » pour écrire : la requête est alors inscrite dans l’activité.')),
-      h('div', { class: 'row', style: 'margin:6px 2px' }, infos),
-      sortie)));
-  rafraichirTables();
-}
-
-function resultat(r, s) {
-  if (!r.columns.length) return h('div', { class: 'card tight mut' }, r.message || 'Aucun résultat.');
-  const csv = () => {
-    const echappe = (v) => (v == null ? '' : /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v);
-    const texte = [r.columns.join(','), ...r.rows.map((l) => l.map(echappe).join(','))].join('\n');
-    const u = URL.createObjectURL(new Blob([texte], { type: 'text/csv' }));
-    const a = h('a', { href: u, download: `${s.name}-resultat.csv` });
-    document.body.append(a); a.click(); a.remove();
-  };
-  return h('div', {},
-    h('div', { class: 'result' }, h('table', {},
-      h('thead', {}, h('tr', {}, r.columns.map((c) => h('th', {}, c)))),
-      h('tbody', {}, r.rows.map((l) => h('tr', {}, l.map((v) => h('td', { class: v == null ? 'nul' : '', title: v == null ? 'NULL' : String(v) }, v == null ? 'NULL' : String(v)))))))),
-    h('div', { class: 'row sp', style: 'margin-top:8px' },
-      h('span', { class: 'mut sm' }, r.truncated ? `affichage des ${r.rows.length} premières lignes sur ${r.total}` : `${r.rows.length} ligne(s)`),
-      h('button', { class: 'sm', onclick: csv }, 'Télécharger en CSV')),
-    r.notice ? h('p', { class: 'mut sm' }, r.notice) : null);
-}
-
-async function variablesTab(body, s) {
-  const vars = await api('GET', `/services/${s.id}/variables`);
-  if (s.kind === 'database') {
-    const rows = Object.entries(vars);
-    body.append(h('div', { class: 'card' },
-      h('h3', {}, 'Identifiants de connexion'),
-      h('p', { class: 'mut sm' }, 'Engendrés à la création, chiffrés au repos. Dans un autre service du projet, écrivez ', h('span', { class: 'mono' }, `\${{${s.name}.DATABASE_URL}}`), ' : la valeur est injectée au déploiement.'),
-      h('table', {}, h('tbody', {}, rows.map(([k, v]) => h('tr', {},
-        h('td', { class: 'mono' }, k),
-        h('td', { class: 'mono trunc', style: 'max-width:380px' }, /PASSWORD|URL/.test(k) ? '•'.repeat(18) : v),
-        h('td', { class: 'actions' },
-          h('button', { class: 'sm', onclick: () => copy(v) }, 'Copier'),
-          h('button', { class: 'sm', onclick: () => copy(`\${{${s.name}.${k}}}`) }, 'Copier la référence')))))),
-      s.engine_info?.client ? h('p', { class: 'sm mut' }, 'Client en ligne de commande, depuis le serveur : ', h('span', { class: 'mono' }, `docker exec -it ${s.active_deployment?.container || '<conteneur>'} ${s.engine_info.client}`)) : null));
-    return;
-  }
-  const rows = h('div', {});
-  const addRow = (k = '', v = '') => rows.append(h('div', { class: 'row', style: 'margin:6px 0' },
-    h('input', { class: 'k mono', placeholder: 'NOM', value: k, style: 'flex:1' }),
-    h('input', { class: 'v mono', placeholder: 'valeur', value: v, style: 'flex:2' }),
-    h('button', { class: 'dng sm', title: 'Retirer', onclick: (e) => e.currentTarget.parentElement.remove() }, '✕')));
-  Object.entries(vars).forEach(([k, v]) => addRow(k, v));
-  const save = act(async () => {
-    const next = {};
-    for (const r of rows.children) { const k = r.querySelector('.k').value.trim(); if (k) next[k] = r.querySelector('.v').value; }
-    for (const k of Object.keys(vars)) if (!(k in next)) await api('DELETE', `/services/${s.id}/variables/${encodeURIComponent(k)}`);
-    await api('PUT', `/services/${s.id}/variables`, { variables: next });
-  }, 'Variables enregistrées — redéployez pour les appliquer');
-  body.append(h('div', { class: 'card' },
-    h('p', { class: 'mut sm' }, 'Fournies à votre API comme variables d’environnement. ', h('span', { class: 'mono' }, 'PORT'), ' et ', h('span', { class: 'mono' }, 'RAIL_*'), ' sont posées par Rail. Chiffrées au repos. Pour pointer une base du projet : ', h('span', { class: 'mono' }, '${{ma-base.DATABASE_URL}}'), '.'),
-    rows,
-    h('div', { class: 'row' },
-      h('button', { onclick: () => addRow() }, '+ Variable'),
-      h('button', { class: 'pri', onclick: save }, 'Enregistrer'),
-      h('button', { onclick: act(async () => { await save(); await api('POST', `/services/${s.id}/redeploy`); go(s.id, 'deployments'); }) }, 'Enregistrer et redéployer'))));
-}
-
-function domainsTab(body, s) {
-  const host = h('input', { placeholder: 'api.mondomaine.com', style: 'flex:1' });
-  body.append(h('div', { class: 'card' },
-    h('table', {}, h('tbody', {}, s.domains.map((d) => h('tr', {},
-      h('td', {}, h('a', { href: d.url || `https://${d.hostname}`, target: '_blank', rel: 'noopener' }, d.hostname)),
-      h('td', { class: 'mut' }, d.kind === 'auto' ? 'fourni' : 'personnalisé'),
-      h('td', { class: 'actions' }, h('button', { class: 'sm dng', onclick: act(async () => { await api('DELETE', `/services/${s.id}/domains/${d.id}`); render(); }) }, 'Retirer')))))),
-    h('div', { class: 'row', style: 'margin-top:12px' }, host,
-      h('button', { class: 'pri', onclick: act(async () => { await api('POST', `/services/${s.id}/domains`, { hostname: host.value }); render(); }, 'Domaine ajouté — redéployez pour l’appliquer') }, 'Ajouter')),
-    h('p', { class: 'mut sm' }, `Pour un domaine personnalisé : un enregistrement DNS A (ou CNAME vers ${cfg.dashboardHost || 'ce serveur'}) vers ce serveur, puis « Redéployer ». Le certificat HTTPS est demandé automatiquement.`)));
-}
-
-function settingsTab(body, s) {
-  if (s.kind === 'database') { databaseSettings(body, s); return; }
-  const f = {
-    repo: h('input', { value: s.repo }), branch: h('input', { value: s.branch }), root_dir: h('input', { value: s.root_dir }),
-    dockerfile_path: h('input', { value: s.dockerfile_path || '', placeholder: 'auto' }),
-    port: h('input', { type: 'number', value: s.port }), healthcheck_path: h('input', { value: s.healthcheck_path || '', placeholder: '/health' }),
-    memory_mb: h('input', { type: 'number', value: s.memory_mb || '', placeholder: 'défaut' }),
-    cpus: h('input', { type: 'number', step: '0.1', value: s.cpus || '', placeholder: 'défaut' }),
-    volume_path: h('input', { value: s.volume_path || '', placeholder: '/data (facultatif)' }),
-    github_token: h('input', { type: 'password', placeholder: s.has_github_token ? '•••••• (enregistré — laisser vide pour conserver)' : 'aucun', autocomplete: 'off' }),
-  };
-  const auto = h('input', { type: 'checkbox', checked: s.auto_deploy, style: 'width:auto' });
-  const save = act(async (e) => {
-    e.preventDefault();
-    const p = {
-      repo: f.repo.value, branch: f.branch.value, root_dir: f.root_dir.value, dockerfile_path: f.dockerfile_path.value || null,
-      port: +f.port.value, healthcheck_path: f.healthcheck_path.value || null,
-      memory_mb: f.memory_mb.value ? +f.memory_mb.value : null, cpus: f.cpus.value ? +f.cpus.value : null,
-      volume_path: f.volume_path.value || null, auto_deploy: auto.checked,
-    };
-    if (f.github_token.value) p.github_token = f.github_token.value;
-    await api('PATCH', `/services/${s.id}`, p);
-    render();
-  }, 'Réglages enregistrés');
-  body.append(
-    h('form', { class: 'card', onsubmit: save },
-      h('div', { class: 'grid2' }, field('Dépôt', f.repo), field('Branche suivie', f.branch), field('Dossier racine', f.root_dir),
-        field('Dockerfile (chemin)', f.dockerfile_path), field('Port', f.port), field('Chemin de santé', f.healthcheck_path),
-        field('Mémoire (Mo)', f.memory_mb), field('CPU', f.cpus)),
-      field('Volume persistant (point de montage)', f.volume_path, 'Un dossier qui survit aux déploiements. Attention : avec un volume, la nouvelle version ne peut pas tourner à côté de l’ancienne (courte interruption).'),
-      field('Jeton GitHub', f.github_token),
-      h('label', { class: 'row', style: 'color:var(--fg);margin-top:14px' }, auto, 'Déployer automatiquement à chaque push sur la branche'),
-      h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Enregistrer'))),
-    webhookCard(s),
-    dangerCard(s));
-}
-
-function webhookCard(s) {
-  return h('div', { class: 'card' },
-    h('h3', {}, 'Déploiement à chaque push (webhook GitHub)'),
-    h('p', { class: 'mut sm' }, 'Automatique si un jeton avec le droit « Webhooks: write » est enregistré :'),
-    h('p', {}, h('button', { onclick: act(async () => { await api('POST', `/services/${s.id}/webhook/install`); }, 'Webhook installé sur GitHub') }, 'Installer le webhook')),
-    h('p', { class: 'mut sm' }, 'Ou à la main (Settings → Webhooks → Add webhook), type « application/json », événement « push » :'),
-    h('div', { class: 'row' }, h('span', { class: 'mono trunc' }, s.webhook.url), h('button', { class: 'sm', onclick: () => copy(s.webhook.url) }, 'Copier')),
-    h('div', { class: 'row' }, h('span', { class: 'mono' }, 'Secret : ••••••••'), h('button', { class: 'sm', onclick: () => copy(s.webhook.secret) }, 'Copier le secret')));
-}
-
-function databaseSettings(body, s) {
-  const image = h('input', { value: s.base_image, style: 'width:100%' });
-  const memory_mb = h('input', { type: 'number', value: s.memory_mb || '' });
-  const cpus = h('input', { type: 'number', step: '0.1', value: s.cpus || '' });
-  body.append(
-    h('form', {
+    me.user.root ? null : h('form', {
       class: 'card',
       onsubmit: act(async (e) => {
         e.preventDefault();
-        await api('PATCH', `/services/${s.id}`, { base_image: image.value, memory_mb: memory_mb.value ? +memory_mb.value : null, cpus: cpus.value ? +cpus.value : null });
+        await api('POST', '/me/password', { current: actuel.value, next: neuf.value });
+        toast('Mot de passe changé — les autres sessions ont été fermées');
+        actuel.value = ''; neuf.value = '';
         render();
-      }, 'Enregistré — « Redéployer » pour appliquer'),
+      }),
     },
-    h('h3', {}, 'Réglages de la base'),
-    field('Image', image, 'Changer de version majeure peut demander une migration des données : vérifiez la documentation du moteur.'),
-    h('div', { class: 'grid2' }, field('Mémoire (Mo)', memory_mb), field('CPU', cpus)),
-    h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Enregistrer'))),
+    h('h3', {}, 'Mot de passe'),
+    h('div', { class: 'grid2' }, field('Mot de passe actuel', actuel), field('Nouveau mot de passe', neuf, '10 caractères au moins')),
+    h('p', {}, h('button', { class: 'pri', type: 'submit' }, 'Changer le mot de passe'))),
+
     h('div', { class: 'card' },
-      h('h3', {}, 'Sauvegarde'),
-      h('p', { class: 'mut sm' }, 'Un export complet, en flux, depuis le conteneur. Gardez-le ailleurs que sur ce serveur.'),
-      h('p', {}, h('button', { onclick: act(async () => { toast('Sauvegarde en cours…'); await download(`/services/${s.id}/backup`, `${s.name}.sql`); }, 'Sauvegarde téléchargée') }, 'Télécharger une sauvegarde')),
-      s.volume ? h('p', { class: 'mut sm' }, 'Volume : ', h('span', { class: 'mono' }, s.volume.name), ' — à inclure dans vos sauvegardes du serveur.') : null),
-    dangerCard(s));
+      h('h3', {}, 'Compte GitHub'),
+      me.github.connected
+        ? h('p', {}, `Relié${me.github.login ? ` : ${me.github.login}` : ''} (${me.github.scope}). Rail peut lister vos dépôts, les cloner et installer les webhooks.`)
+        : h('p', { class: 'mut sm' }, 'Reliez un jeton pour choisir vos dépôts dans une liste au lieu de les écrire. Droits utiles : « Contents: read » et « Webhooks: write ».'),
+      h('div', { class: 'row' }, jeton,
+        h('button', { class: 'pri', onclick: act(async () => { const r = await api('POST', '/me/github', { token: jeton.value.trim(), shared: partage.checked }); toast(`GitHub relié : ${r.github.login}`); render(); }) }, 'Relier'),
+        me.github.connected ? h('button', { class: 'dng', onclick: act(async () => { await api('DELETE', '/me/github'); render(); }, 'Jeton retiré') }, 'Retirer') : null),
+      !can('admin') ? null : h('label', { class: 'row', style: 'color:var(--fg)' }, partage, 'Partager ce jeton avec toute la plateforme (pour les dépôts de l’organisation)')),
+
+    me.user.root ? null : h('div', { class: 'card' },
+      h('h3', {}, 'Jetons d’API (ligne de commande)'),
+      h('p', { class: 'mut sm' }, 'Un jeton vaut votre rôle. Pour la CLI : ', h('span', { class: 'mono' }, `RAIL_URL=${App.cfg.publicUrl || ''} RAIL_TOKEN=… rail status`)),
+      tokens.length ? h('table', {}, h('tbody', {}, tokens.map((t) => h('tr', {},
+        h('td', { class: 'mono' }, t.name),
+        h('td', { class: 'mut sm' }, `créé ${ago(t.created_at)}`),
+        h('td', { class: 'mut sm' }, t.last_used_at ? `utilisé ${ago(t.last_used_at)}` : 'jamais utilisé'),
+        h('td', { class: 'actions' }, h('button', { class: 'sm dng', onclick: act(async () => { await api('DELETE', `/me/tokens/${t.id}`); render(); }, 'Jeton révoqué') }, 'Révoquer')))))) : h('div', { class: 'empty sm' }, 'Aucun jeton.'),
+      !can('member') ? null : h('div', { class: 'row', style: 'margin-top:10px' }, nomJeton,
+        h('button', {
+          class: 'pri',
+          onclick: act(async () => {
+            const t = await api('POST', '/me/tokens', { name: (nomJeton.value || 'cli').trim() });
+            dialog('Jeton créé', h('div', {},
+              h('p', {}, 'Copiez-le maintenant : il ne sera plus affiché.'),
+              h('pre', { class: 'log' }, t.token),
+              h('p', {}, copyBtn(t.token, 'Copier le jeton')),
+              h('p', { class: 'mut sm' }, 'Pour la CLI : ', h('span', { class: 'mono' }, `export RAIL_URL=${App.cfg.publicUrl || ''} RAIL_TOKEN=${t.token.slice(0, 10)}…`))));
+            render();
+          }),
+        }, 'Créer un jeton'))),
+
+    me.user.root ? null : h('div', { class: 'card' },
+      h('h3', {}, 'Sessions ouvertes'),
+      h('table', {}, h('tbody', {}, sessions.map((x) => h('tr', {},
+        h('td', {}, x.current ? h('strong', {}, 'cette session') : h('span', { class: 'mut' }, 'autre navigateur')),
+        h('td', { class: 'mut sm' }, x.ip || '—'),
+        h('td', { class: 'mut sm trunc', style: 'max-width:260px', title: x.agent || '' }, x.agent || '—'),
+        h('td', { class: 'mut sm' }, `vue ${ago(x.seen_at)}`),
+        h('td', { class: 'actions' }, x.current ? null : h('button', { class: 'sm dng', onclick: act(async () => { await api('DELETE', `/me/sessions/${x.id}`); render(); }, 'Session fermée') }, 'Fermer')))))),
+      h('p', { class: 'mut sm' }, 'Changer de mot de passe ferme toutes les autres sessions.')),
+  );
 }
 
-function dangerCard(s) {
-  return h('div', { class: 'card' },
-    h('h3', { style: 'color:var(--ko)' }, 'Zone dangereuse'),
-    s.volume ? h('p', { class: 'mut sm' }, 'Supprimer ce service supprime aussi son volume ', h('span', { class: 'mono' }, s.volume.name), ' : les données seront perdues.') : null,
-    h('button', {
-      class: 'dng',
-      onclick: confirmThen(`Supprimer « ${s.name} » (conteneurs, images${s.volume ? ', et le volume avec ses données' : ''}) ?`,
-        async () => { await api('DELETE', `/services/${s.id}`); location.hash = '#/'; }),
-    }, 'Supprimer ce service'));
+// ── comptes (administrateur) ──────────────────────────────────────────────
+async function usersView() {
+  const users = await api('GET', '/users');
+  const roles = App.me?.roles || [];
+  const creer = () => {
+    const login = h('input', { required: true, pattern: '[a-z0-9][a-z0-9._\\-]{1,30}', placeholder: 'prenom.nom' });
+    const nom = h('input', { placeholder: 'Prénom Nom' });
+    const mdp = h('input', { type: 'password', required: true, autocomplete: 'new-password' });
+    const role = h('select', {}, roles.map((r) => h('option', { value: r.id, selected: r.id === 'member' }, `${r.label} — ${r.help}`)));
+    formDialog('Nouveau compte',
+      h('div', {},
+        h('div', { class: 'grid2' }, field('Identifiant', login), field('Nom affiché', nom)),
+        field('Rôle', role),
+        field('Mot de passe provisoire', mdp, '10 caractères au moins — la personne devra le changer')),
+      async () => {
+        await api('POST', '/users', { login: login.value.trim(), name: nom.value.trim() || null, password: mdp.value, role: role.value });
+        render();
+      });
+  };
+  const changerMdp = (u) => {
+    const mdp = h('input', { type: 'password', required: true, autocomplete: 'new-password' });
+    formDialog(`Nouveau mot de passe — ${u.login}`,
+      field('Mot de passe provisoire', mdp, 'Les sessions ouvertes de cette personne seront fermées'),
+      async () => { await api('PATCH', `/users/${u.id}`, { password: mdp.value }); toast('Mot de passe remis à zéro'); render(); }, 'Enregistrer');
+  };
+  $app.replaceChildren(
+    h('div', { class: 'row sp' }, h('h1', {}, 'Comptes'), h('button', { class: 'pri', onclick: creer }, '+ Nouveau compte')),
+    h('p', { class: 'mut' }, 'Un lecteur voit tout sans rien changer ; un membre déploie et exploite ; un administrateur gère en plus les comptes et la machine.'),
+    h('div', { class: 'card' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Identifiant', 'Nom', 'Rôle', 'Dernière venue', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, users.map((u) => h('tr', {},
+        h('td', { class: 'mono' }, u.login, u.must_change_password ? h('span', { class: 'tag' }, 'mot de passe à changer') : null),
+        h('td', {}, u.name || '—'),
+        h('td', {}, h('select', {
+          onchange: act(async (ev) => { await api('PATCH', `/users/${u.id}`, { role: ev.target.value }); render(); }, 'Rôle changé'),
+        }, roles.map((r) => h('option', { value: r.id, selected: r.id === u.role }, r.label)))),
+        h('td', { class: 'mut sm' }, u.last_seen_at ? ago(u.last_seen_at) : 'jamais connecté'),
+        h('td', { class: 'actions' },
+          h('button', { class: 'sm', onclick: () => changerMdp(u) }, 'Mot de passe'),
+          h('button', { class: 'sm dng', onclick: confirmThen(`Supprimer le compte « ${u.login} » ?`, async () => { await api('DELETE', `/users/${u.id}`); render(); }) }, 'Supprimer'))))))),
+  );
 }
 
 // ── routage ───────────────────────────────────────────────────────────────
 function navLinks(view) {
   $nav.replaceChildren(
     h('a', { href: '#/', class: view === 'home' ? 'on' : '' }, 'Services'),
+    h('a', { href: '#/templates', class: view === 'templates' ? 'on' : '' }, 'Catalogue'),
     h('a', { href: '#/containers', class: view === 'containers' ? 'on' : '' }, 'Conteneurs'),
     h('a', { href: '#/activity', class: view === 'activity' ? 'on' : '' }, 'Activité'),
-    h('a', { href: '#/system', class: view === 'system' ? 'on' : '' }, 'Système'));
+    h('a', { href: '#/system', class: view === 'system' ? 'on' : '' }, 'Système'),
+    can('admin') ? h('a', { href: '#/users', class: view === 'users' ? 'on' : '' }, 'Comptes') : null,
+    h('a', { href: '#/account', class: view === 'account' ? 'on' : '' }, App.me?.user?.login || 'Mon compte'),
+  );
 }
 
 async function render() {
   leaveAll();
-  document.getElementById('logout').hidden = !getToken();
-  $nav.hidden = !getToken();
-  if (!getToken()) return loginView();
+  // Pas de session connue : on demande qui c'est. La route est publique et répond
+  // « personne » plutôt que de refuser : aucun 401 à chaque ouverture de la page.
+  if (!App.me) {
+    document.getElementById('logout').hidden = true;
+    $nav.hidden = true;
+    const s = await api('GET', '/session').catch(() => ({ authenticated: false }));
+    if (!s.authenticated) {
+      document.getElementById('domain').textContent = s.version ? `v${s.version}` : '';
+      return loginView({ setupNeeded: !!s.setup_needed });
+    }
+    App.me = s; setCsrf(s.csrf);
+  }
+  document.getElementById('logout').hidden = false;
+  $nav.hidden = false;
   try {
-    cfg = { ...cfg, ...(await api('GET', '/config')) };
-    document.getElementById('domain').textContent = `${cfg.domain} · v${cfg.version}`;
-    const m = /^#\/services\/([a-f0-9]+)(?:\/([a-z]+))?/.exec(location.hash);
-    if (m) { navLinks('home'); await serviceView(m[1], m[2]); }
+    App.cfg = { ...App.cfg, ...(await api('GET', '/config')) };
+    document.getElementById('domain').textContent = `${App.cfg.domain} · v${App.cfg.version}`;
+    const svc = /^#\/services\/([a-f0-9]+)(?:\/([a-z]+))?/.exec(location.hash);
+    const proj = /^#\/projects\/([a-f0-9]+)/.exec(location.hash);
+    if (svc) { navLinks('home'); await serviceView(svc[1], svc[2]); }
+    else if (proj) { navLinks('home'); await projectView(proj[1]); }
+    else if (location.hash.startsWith('#/templates')) { navLinks('templates'); await templatesView(); }
     else if (location.hash.startsWith('#/containers')) { navLinks('containers'); await containersView(); }
     else if (location.hash.startsWith('#/activity')) { navLinks('activity'); await activityView(); }
     else if (location.hash.startsWith('#/system')) { navLinks('system'); await systemView(); }
+    else if (location.hash.startsWith('#/account')) { navLinks('account'); await accountView(); }
+    else if (location.hash.startsWith('#/users')) { navLinks('users'); await usersView(); }
     else { navLinks('home'); await overviewView(); }
   } catch (e) {
-    if (!getToken()) return loginView();
+    if (!App.me) return render();
     $app.replaceChildren(h('div', { class: 'card' }, h('strong', {}, 'Erreur'), h('p', {}, e.message), h('button', { onclick: render }, 'Réessayer')));
   }
   return undefined;
 }
+App.render = render;
 
 addEventListener('hashchange', render);
 render();

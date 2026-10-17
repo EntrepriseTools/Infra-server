@@ -407,7 +407,7 @@ export class Deployer {
    * Exécute une tâche planifiée : un conteneur jetable (`--rm`), l'image du dernier
    * déploiement, les variables du service, et sa sortie gardée dans l'historique.
    */
-  async runJob(serviceId, { trigger = 'manual' } = {}) {
+  runJob(serviceId, { trigger = 'manual' } = {}) {
     const svc = this.store.getService(serviceId);
     if (!svc) throw new Error('service inconnu');
     if (svc.kind !== 'cron') throw new Error('ce service n\'est pas une tâche planifiée');

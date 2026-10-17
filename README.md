@@ -26,14 +26,18 @@ installée sur le serveur**. On y fait passer les applications **une par une**
 — pilotage d'abord, paie en dernier — avec un retour arrière possible à
 chaque étape ([migration](docs/plateforme/09-migration.md)).
 
-> **Et une troisième brique : [Rail](paas/LISEZMOI.md)** — un « Railway » auto-hébergé pour déployer
-> *n'importe quelle API* depuis GitHub : on relie un dépôt, chaque `git push` construit, vérifie la santé,
-> bascule le trafic sans coupure (HTTPS automatique) et permet le retour arrière en un clic. On y ajoute des
-> **bases managées** (PostgreSQL, MySQL, Redis, MongoDB) avec volume persistant, console SQL et sauvegarde, et on
-> **surveille** le tout — processeur, mémoire, réseau, disponibilité, fil d'activité, alertes, et même les conteneurs
-> que Rail n'a pas déployés — depuis un tableau de bord, la CLI `rail` ou l'API. Indépendante des deux voies ci-dessus :
-> elle prend les ports 80/443 si la machine est à elle, sinon elle se met derrière le nginx existant
-> (`RAIL_TLS=proxy`) ou prend des ports à elle (`RAIL_TLS=dns`).
+> **Et une troisième brique : [Rail](paas/LISEZMOI.md)** — un « Railway » auto-hébergé. On s'y connecte avec un
+> **identifiant et un mot de passe** (trois rôles : lecteur, membre, administrateur), on choisit un dépôt GitHub
+> **dans une liste**, et chaque `git push` construit, vérifie la santé, bascule le trafic sans coupure (HTTPS
+> automatique) et permet le retour arrière en un clic. Un service peut aussi partir d'une **image Docker**, et une
+> pile entière d'un **catalogue en un clic** (n8n, Ghost, WordPress, Metabase, Gitea, Grafana…). On y ajoute des
+> **bases managées** (PostgreSQL, MySQL, MariaDB, Redis, Valkey, MongoDB, ClickHouse, Meilisearch, RabbitMQ) avec
+> volume persistant, console SQL, **sauvegardes planifiées et restauration**, et exposition TCP à la demande ; des
+> **environnements** par projet (production, préproduction… qui se dupliquent) ; des **tâches planifiées** (cron)
+> avec historique. Le tout **surveillé** — processeur, mémoire, réseau, disponibilité, fil d'activité signé de qui a
+> agi, alertes, et même les conteneurs que Rail n'a pas déployés — depuis un tableau de bord, la CLI `rail` ou l'API.
+> Indépendante des deux voies ci-dessus : elle prend les ports 80/443 si la machine est à elle, sinon elle se met
+> derrière le nginx existant (`RAIL_TLS=proxy`) ou prend des ports à elle (`RAIL_TLS=dns`).
 > Déploiement pas à pas sur le serveur : **[paas/DEPLOIEMENT.md](paas/DEPLOIEMENT.md)**.
 
 ---

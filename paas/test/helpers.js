@@ -31,7 +31,11 @@ export class FakeRuntime {
   async ensureNetwork() {}
   async build({ tag, dockerfile, contextDir, onLog }) {
     this.#n(`build ${tag}`);
-    this.lastBuild = { tag, dockerfile, contextDir, files: fs.readdirSync(contextDir) };
+    this.lastBuild = {
+      tag, dockerfile, contextDir, files: fs.readdirSync(contextDir),
+      // Le dossier de construction est effacé juste après : on garde le texte, pas le chemin.
+      dockerfileText: fs.readFileSync(dockerfile, 'utf8'),
+    };
     onLog?.('Step 1/1 : FROM scratch\n');
     if (this.buildError) throw new Error(this.buildError);
     this.images.add(tag);
@@ -122,7 +126,7 @@ export function env(overrides = {}) {
   const github = {
     commitStatus: async (s) => { statuses.push(s); },
     installWebhook: async () => 42,
-    me: async (token) => (token === 'ghp_mauvais' ? (() => { throw new Error('jeton GitHub refusé'); })() : { login: 'octocat', name: 'Octo Cat', avatar_url: null, html_url: null }),
+    me: async (token) => (String(token).includes('mauvais') ? (() => { throw new Error('jeton GitHub refusé'); })() : { login: 'octocat', name: 'Octo Cat', avatar_url: null, html_url: null }),
     repos: async () => [
       { full_name: 'acme/api', private: false, default_branch: 'main', description: 'une API', language: 'JavaScript', pushed_at: '2026-01-01T00:00:00Z', html_url: null, archived: false },
       { full_name: 'acme/site', private: true, default_branch: 'prod', description: null, language: 'Go', pushed_at: '2025-12-01T00:00:00Z', html_url: null, archived: false },

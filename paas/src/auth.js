@@ -9,7 +9,7 @@
 // porter l'anti-CSRF de la session : un autre site ne peut rien déclencher ici.
 import { HttpError } from './validate.js';
 import { safeEqual } from './crypto.js';
-import { verifyPassword, hashPassword, allows, COOKIE, parseCookies, serializeCookie } from './users.js';
+import { verifyPassword, hashPassword, allows, ROLES, COOKIE, parseCookies, serializeCookie } from './users.js';
 
 const ROOT = { id: 'root', login: 'root', name: 'Jeton d\'administration', role: 'admin', root: true };
 /** Un haché jetable, du même coût que les vrais : il fait travailler le serveur
@@ -66,7 +66,10 @@ export class Auth {
   /** Lève une HttpError si l'appelant n'a pas le droit d'appeler cette route. */
   authorize(req, who, needed) {
     if (!who) throw new HttpError(401, 'connexion nécessaire');
-    if (!allows(who.user.role, needed)) throw new HttpError(403, `réservé au rôle « ${needed} » (le vôtre : ${who.user.role})`);
+    if (!allows(who.user.role, needed)) {
+      const label = (x) => ROLES[x]?.label?.toLowerCase() ?? x;
+      throw new HttpError(403, `réservé au rôle « ${label(needed)} » ou plus (le vôtre : ${label(who.user.role)})`);
+    }
     if (who.via === 'session' && !SANS_ECRITURE.has(req.method)) {
       const given = req.headers['x-rail-csrf'];
       if (!given || !safeEqual(given, who.session.csrf)) throw new HttpError(403, 'jeton anti-CSRF manquant ou invalide');

@@ -88,7 +88,7 @@ export function mountData(ctx) {
     if (s.kind !== 'database') throw new HttpError(400, 'seule une base de données se sauvegarde');
     try {
       const rec = await backups.create(s.id, { trigger: 'manual' });
-      if (rec.status !== 'success') throw new HttpError(500, `sauvegarde en échec : ${String(rec.error || '').split('\n')[0]}`);
+      if (rec.status !== 'success') throw new HttpError(409, `sauvegarde en échec : ${String(rec.error || '').split('\n')[0]}`);
       return ok(rec, 201);
     } catch (e) { throw e instanceof HttpError ? e : new HttpError(409, e.message); }
   });

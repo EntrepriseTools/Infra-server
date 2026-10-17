@@ -31,6 +31,7 @@ nettoyer() {
   docker volume ls -q --filter 'name=^rail-vol-' | xargs -r docker volume rm -f >/dev/null 2>&1 || true
   docker network rm "$RESEAU" >/dev/null 2>&1 || true
   sudo rm -rf "$DATA" 2>/dev/null || rm -rf "$DATA" || true
+  rm -f /tmp/rail-ci-dump.sql /tmp/rail-ci-garde.sql /tmp/rail-ci-cookies.txt /tmp/rail-ci-cookies.txt.lecteur
 }
 trap nettoyer EXIT
 nettoyer
@@ -144,6 +145,128 @@ done
 [ "$n" = 2 ] || die "le redéploiement n'a pas abouti"
 [ "$(api -X POST "$BASE/api/services/$base/query" -d '{"sql":"SELECT x FROM preuve"}' | jq -r '.rows[0][0]')" = 42 ] || die "les données du volume sont perdues"
 echo "  la ligne insérée avant le redéploiement est toujours là"
+
+bleu "Comptes : création, connexion par mot de passe, anti-CSRF, rôles"
+api -X POST "$BASE/api/users" -d '{"login":"ci-membre","password":"mot-de-passe-long","role":"member"}' | jq -e .id >/dev/null \
+  || die "compte non créé"
+api -X POST "$BASE/api/users" -d '{"login":"ci-lecteur","password":"mot-de-passe-long","role":"viewer"}' | jq -e .id >/dev/null \
+  || die "compte lecteur non créé"
+# La connexion pose un cookie de session et renvoie l'anti-CSRF.
+cookies=/tmp/rail-ci-cookies.txt
+rm -f "$cookies"
+csrf="$(curl -sS -c "$cookies" -H 'content-type: application/json' \
+  -d '{"login":"ci-membre","password":"mot-de-passe-long"}' "$BASE/api/login" | jq -r .csrf)"
+[ -n "$csrf" ] && [ "$csrf" != null ] || die "connexion par mot de passe refusée"
+[ "$(curl -sS -b "$cookies" "$BASE/api/session" | jq -r .user.login)" = ci-membre ] || die "la session ne tient pas"
+[ "$(curl -sS -b "$cookies" "$BASE/api/me" | jq -r .user.role)" = member ] || die "le rôle du compte est faux"
+# Une écriture sans l'anti-CSRF est refusée ; avec, elle passe.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$cookies" -X POST -H 'content-type: application/json' \
+    -d '{"name":"depuis-cookie"}' "$BASE/api/projects")" = 403 ] || die "une écriture sans anti-CSRF devrait être refusée"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$cookies" -X POST -H 'content-type: application/json' \
+    -H "x-rail-csrf: $csrf" -d '{"name":"depuis-cookie"}' "$BASE/api/projects")" = 201 ] || die "écriture avec anti-CSRF refusée"
+# Un lecteur regarde, ne change rien.
+rm -f "$cookies.lecteur"
+csrf2="$(curl -sS -c "$cookies.lecteur" -H 'content-type: application/json' \
+  -d '{"login":"ci-lecteur","password":"mot-de-passe-long"}' "$BASE/api/login" | jq -r .csrf)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$cookies.lecteur" "$BASE/api/overview")" = 200 ] || die "un lecteur doit pouvoir regarder"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -b "$cookies.lecteur" -X POST -H 'content-type: application/json' \
+    -H "x-rail-csrf: $csrf2" -d '{"name":"interdit"}' "$BASE/api/projects")" = 403 ] || die "un lecteur ne doit rien pouvoir créer"
+# Un jeton d'API vaut le rôle de son propriétaire.
+jeton="$(curl -sS -b "$cookies" -X POST -H 'content-type: application/json' -H "x-rail-csrf: $csrf" \
+  -d '{"name":"ci"}' "$BASE/api/me/tokens" | jq -r .token)"
+[ "$(curl -sS -H "authorization: Bearer $jeton" "$BASE/api/me" | jq -r .user.login)" = ci-membre ] || die "le jeton d'API ne vaut pas son compte"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $jeton" "$BASE/api/users")" = 403 ] \
+  || die "un jeton de membre ne doit pas voir les comptes"
+echo "  comptes, mot de passe, cookie + anti-CSRF, rôles et jetons d'API : tout tient"
+
+bleu "Service bâti sur une image publique"
+vitrine="$(api -X POST "$BASE/api/projects/$projet/services" \
+  -d '{"name":"vitrine","source":"image","image":"nginx:1.27-alpine","port":80,"deploy":true}' | jq -r .id)"
+[ "$vitrine" != null ] || die "service d'image non créé"
+for _ in $(seq 1 90); do
+  etat="$(api "$BASE/api/services/$vitrine" | jq -r '.latest_deployment.status // "?"')"
+  [ "$etat" = success ] && break
+  [ "$etat" = failed ] && { api "$BASE/api/deployments/$(api "$BASE/api/services/$vitrine" | jq -r .latest_deployment.id)/logs"; die "déploiement d'image en échec"; }
+  sleep 2
+done
+[ "$etat" = success ] || die "l'image n'est pas déployée (état : $etat)"
+cvitrine="$(api "$BASE/api/services/$vitrine" | jq -r .active_deployment.container)"
+docker exec "$cvitrine" nginx -v 2>&1 | grep -qi nginx || die "ce n'est pas nginx qui tourne"
+[ "$(api "$BASE/api/services/$vitrine" | jq -r '.active_deployment.image')" = nginx:1.27-alpine ] || die "l'image déployée n'est pas celle demandée"
+api "$BASE/api/services/$vitrine" | jq -e '.webhook == null' >/dev/null || die "une image n'a pas de webhook GitHub"
+echo "  $cvitrine en marche, sans aucune construction"
+
+bleu "Tâche planifiée : une exécution jetable, son code de sortie et sa sortie"
+tache="$(api -X POST "$BASE/api/projects/$projet/services" \
+  -d '{"name":"menage","kind":"cron","source":"image","image":"alpine:3","cron_schedule":"0 3 * * *","start_command":"echo bonjour-du-cron","deploy":true}' | jq -r .id)"
+[ "$tache" != null ] || die "tâche non créée"
+for _ in $(seq 1 60); do
+  [ "$(api "$BASE/api/services/$tache" | jq -r '.latest_deployment.status // "?"')" = success ] && break
+  sleep 2
+done
+[ "$(api "$BASE/api/services/$tache" | jq -r '.active_deployment.container // "null"')" = null ] \
+  || die "une tâche planifiée ne doit pas garder de conteneur"
+api -X POST "$BASE/api/services/$tache/run" | jq -e .number >/dev/null || die "exécution non lancée"
+for _ in $(seq 1 60); do
+  fini="$(api "$BASE/api/services/$tache/runs" | jq -r '.runs[0].status')"
+  [ "$fini" = success ] && break
+  [ "$fini" = failed ] && { api "$BASE/api/services/$tache/runs" | jq -r '.runs[0].output'; die "l'exécution a échoué"; }
+  sleep 2
+done
+[ "$fini" = success ] || die "l'exécution ne s'est pas terminée (état : $fini)"
+api "$BASE/api/services/$tache/runs" | jq -e '.runs[0] | select(.exit_code == 0) | .output | test("bonjour-du-cron")' >/dev/null \
+  || die "la sortie de la tâche n'est pas celle attendue"
+api "$BASE/api/services/$tache/runs" | jq -e '.next != null and (.words | test("3 h"))' >/dev/null || die "la planification n'est pas lisible"
+echo "  exécution #1 réussie, sortie et code de sortie gardés"
+
+bleu "Sauvegarde gardée sur le serveur, puis restaurée"
+sauve="$(api -X POST "$BASE/api/services/$base/backups" -d '{}')"
+echo "$sauve" | jq -e 'select(.status=="success") | select(.size > 0)' >/dev/null || { echo "$sauve"; die "sauvegarde non faite"; }
+sid="$(echo "$sauve" | jq -r .id)"
+api "$BASE/api/services/$base/backups" | jq -e --arg f "$(echo "$sauve" | jq -r .file)" \
+  '.backups | map(select(.file==$f and .available==true)) | length == 1' >/dev/null || die "la sauvegarde n'est pas listée"
+api "$BASE/api/backups/$sid/download" -o /tmp/rail-ci-garde.sql
+grep -q 'PostgreSQL database dump' /tmp/rail-ci-garde.sql || die "le fichier gardé n'est pas un dump"
+# On casse, puis on restaure.
+api -X POST "$BASE/api/services/$base/query" -d '{"sql":"DROP TABLE preuve","read_only":false}' | jq -e .message >/dev/null
+api -X POST "$BASE/api/backups/$sid/restore" -d '{}' | jq -e .restored >/dev/null || die "restauration en échec"
+[ "$(api -X POST "$BASE/api/services/$base/query" -d '{"sql":"SELECT x FROM preuve"}' | jq -r '.rows[0][0]')" = 42 ] \
+  || die "la restauration n'a pas ramené les données"
+api "$BASE/api/events" | jq -e 'map(.kind) | index("database.restore")' >/dev/null || die "la restauration n'est pas dans l'activité"
+echo "  sauvegarde fabriquée, listée, téléchargée, et restaurée après un DROP"
+
+bleu "Exposition TCP : un port publié sur la machine, puis refermé"
+port="$(api -X POST "$BASE/api/services/$base/expose" -d '{}' | jq -r .public_port)"
+[ -n "$port" ] && [ "$port" != null ] || die "exposition refusée"
+api -X POST "$BASE/api/services/$base/redeploy" >/dev/null
+for _ in $(seq 1 90); do
+  n="$(api "$BASE/api/services/$base" | jq -r '.active_deployment.number // 0')"
+  [ "$n" -ge 3 ] && break
+  sleep 2
+done
+cexpose="$(api "$BASE/api/services/$base" | jq -r .active_deployment.container)"
+docker port "$cexpose" | grep -q ":$port" || { docker port "$cexpose"; die "le port $port n'est pas publié"; }
+PGPASSWORD="$(api "$BASE/api/services/$base/variables" | jq -r .POSTGRES_PASSWORD)" \
+  docker run --rm -e PGPASSWORD --network host postgres:16-alpine \
+  psql -h 127.0.0.1 -p "$port" -U rail -d base -tAc 'SELECT 1' | grep -q 1 \
+  || die "la base n'est pas joignable sur le port publié"
+api -X DELETE "$BASE/api/services/$base/expose" >/dev/null
+echo "  port $port ouvert, base joignée de l'extérieur, puis refermé"
+
+bleu "Environnement dupliqué : les services suivent, les mots de passe non"
+preprod="$(api -X POST "$BASE/api/projects/$projet/environments" -d "{\"name\":\"preprod\",\"copy_from\":\"$(api "$BASE/api/projects/$projet" | jq -r '.environments[] | select(.name=="production") | .id')\"}")"
+echo "$preprod" | jq -e '.services | length >= 3' >/dev/null || { echo "$preprod"; die "les services n'ont pas été copiés"; }
+basecopie="$(echo "$preprod" | jq -r '.services[] | select(.name=="base") | .id')"
+[ "$(api "$BASE/api/services/$basecopie/variables" | jq -r .POSTGRES_PASSWORD)" \
+  != "$(api "$BASE/api/services/$base/variables" | jq -r .POSTGRES_PASSWORD)" ] || die "le mot de passe a été recopié"
+api "$BASE/api/services/$basecopie" | jq -e '.private_host == "base.integration-preprod.internal"' >/dev/null \
+  || die "l'hôte privé du nouvel environnement est faux"
+api -X DELETE "$BASE/api/environments/$(echo "$preprod" | jq -r .id)" >/dev/null
+echo "  environnement « preprod » créé avec des identifiants neufs, puis supprimé"
+
+bleu "Le catalogue répond"
+api "$BASE/api/templates" | jq -e 'length >= 10 and (map(.id) | index("n8n") != null)' >/dev/null || die "catalogue vide"
+api "$BASE/api/databases/engines" | jq -e 'length >= 9' >/dev/null || die "moteurs manquants"
 
 bleu "Suppression : conteneur et volume disparaissent"
 conteneur2="$(api "$BASE/api/services/$base" | jq -r .active_deployment.container)"

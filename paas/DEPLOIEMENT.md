@@ -115,37 +115,56 @@ Puis, depuis la machine, avec le jeton affiché par `install.sh` :
 
 ```bash
 export RAIL_URL=https://rail.apps.exemple.com     # + :8443 dans le cas C
-export RAIL_TOKEN=...                             # affiché par install.sh ; aussi dans .env
+export RAIL_TOKEN=...                             # le « jeton de secours » affiché par install.sh
+./bin/rail.js whoami          # qui je suis, avec quel rôle
 ./bin/rail.js status          # le serveur, les projets, l'état de chaque service
 ./bin/rail.js containers      # TOUT ce que Docker fait tourner ici, Rail ou non
 ```
 
-`rail status` qui répond, c'est l'installation réussie. Ouvrez ensuite le tableau de
-bord dans un navigateur et entrez le jeton.
+`rail status` qui répond, c'est l'installation réussie. Ouvrez ensuite le tableau de bord
+dans un navigateur et **connectez-vous avec l'identifiant et le mot de passe** affichés par
+`install.sh`. Premier geste conseillé : *Mon compte* → changer le mot de passe, puis
+*Mon compte → Compte GitHub* → coller un jeton GitHub (`Contents: read`, `Webhooks: write`)
+pour choisir vos dépôts dans une liste.
+
+> Si `.env` n'a pas de `RAIL_ADMIN_LOGIN` (installation plus ancienne), le tableau de bord
+> demande le **jeton d'administration** pour créer le premier compte, puis se referme : la
+> fenêtre d'installation ne reste pas ouverte.
+
+Une fois le compte créé, `RAIL_ADMIN_PASSWORD` ne sert plus à rien dans `.env` : retirez-le.
+Pour la CLI, préférez un **jeton d'API** à votre nom (`./bin/rail.js token:new mon-portable`)
+au jeton de secours.
 
 ---
 
 ## 4. Le premier service, et la première base
 
+Le plus simple est le tableau de bord : **Nouveau projet** → **+ Service** → *Dépôt GitHub*,
+on prend le dépôt dans la liste, et Rail installe le webhook puis déploie. En ligne de commande :
+
 ```bash
-./bin/rail.js project:new demo
-./bin/rail.js db:new demo base --engine postgres          # volume + identifiants engendrés
-./bin/rail.js service:new demo api proprietaire/depot --port 8080 --health /health
+./bin/rail.js project:new demo                            # crée aussi l'environnement « production »
+./bin/rail.js db:new demo base --engine postgres --backup "0 3 * * *"
+./bin/rail.js service:new demo api proprietaire/depot --port 8080 --health /health --deploy
 ./bin/rail.js vars:set demo/api DATABASE_URL='${{base.DATABASE_URL}}'
-./bin/rail.js deploy demo/api
+./bin/rail.js redeploy demo/api
 ./bin/rail.js logs demo/api --build -f                    # la construction en direct
 ```
 
-Pour un dépôt privé, ajoutez `--token ghp_…` (jeton *fine-grained* limité au dépôt,
-droit `Contents: read`). Pour déployer à chaque `git push` :
-`./bin/rail.js webhook demo/api` (le jeton doit avoir `Webhooks: write`).
+Pour un dépôt privé, reliez un jeton GitHub (voir l'étape 3) ou ajoutez `--token ghp_…` au
+service. Pour déployer à chaque `git push` : `./bin/rail.js webhook demo/api`.
 
-Vérifications :
+Et pour vérifier que tout le reste répond :
 
 ```bash
 curl -I https://api-demo.apps.exemple.com     # 200 (ou 301 si votre API redirige)
 ./bin/rail.js sql demo/base "SELECT version()"
 ./bin/rail.js metrics demo/api
+./bin/rail.js templates                       # le catalogue en un clic
+./bin/rail.js template demo uptime-kuma       # une pile entière, déployée
+./bin/rail.js env:new demo preprod --copy production   # un deuxième environnement
+./bin/rail.js job:new demo menage --schedule "0 3 * * *" --image alpine:3 --start "echo ok"
+./bin/rail.js backup:new demo/base            # une sauvegarde gardée sur le serveur
 ```
 
 ---
@@ -165,6 +184,16 @@ sudo ./sauvegarde.sh                   # une première, tout de suite
 **Mettez `.env` en lieu sûr** (hors du serveur) : sans `RAIL_SECRET_KEY`, les variables
 et les identifiants de bases chiffrés sont définitivement illisibles.
 
+Deux filets de plus, côté bases et côté comptes :
+
+```bash
+# Sauvegardes automatiques d'une base, gardées sur le serveur (et donc dans l'archive)
+./bin/rail.js backup:auto demo/base "0 3 * * *" --keep 14
+
+# Un compte par personne, avec le bon rôle (lecteur = regarde, membre = déploie)
+./bin/rail.js user:new marie --password '…' --role member
+```
+
 ---
 
 ## 6. Quand ça coince
@@ -178,7 +207,11 @@ et les identifiants de bases chiffrés sont définitivement illisibles.
 | certificat invalide | DNS pas encore propagé, ou quota Let's Encrypt | `dig +short rail.<domaine>`, puis `docker compose logs traefik` |
 | 404 sur un service | aucun déploiement réussi, service arrêté, ou domaine ajouté sans redéployer | `./bin/rail.js status` |
 | `pas de réponse saine après 120s` | l'API n'écoute pas sur `$PORT` / `0.0.0.0` | lire « derniers logs du conteneur » dans le journal du déploiement |
-| disque plein | images orphelines | page *Système* → *Nettoyer*, ou `./bin/rail.js prune` |
+| disque plein | images orphelines, sauvegardes gardées | page *Système* → *Nettoyer*, `./bin/rail.js prune`, `./bin/rail.js backups demo/base` |
+| `réservé au rôle …` | le compte est lecteur, ou l'action demande un administrateur | page *Comptes* |
+| `aucun jeton GitHub` | personne n'a relié de compte GitHub | *Mon compte → Compte GitHub* |
+| un modèle démarre puis s'arrête | l'image veut son volume à elle | *Réglages du service → Propriétaire du volume* (1000, 472…), puis redéployer |
+| une tâche planifiée ne part pas | suspendue, planification invalide, ou heure du serveur (UTC) | onglet *Exécutions* |
 
 Rien de tout cela ne touche aux conteneurs déjà en marche : redémarrer le plan de
 contrôle ne coupe aucun service.
@@ -196,6 +229,11 @@ contrôle ne coupe aucun service.
   volume part avec lui. Sauvegardez d'abord (`./bin/rail.js backup projet/base > dump.sql`).
 - **Ne pas** relier un dépôt GitHub que vous ne maîtrisez pas : son `Dockerfile`
   s'exécute sur ce serveur.
+- **Ne pas** laisser traîner `RAIL_ADMIN_PASSWORD` dans `.env` après la création du compte,
+  ni partager le jeton de secours : il vaut un accès root à la machine.
+- **Ne pas** exposer une base en TCP « pour voir » : le port est publié sur la machine.
+  Fermez-le (`./bin/rail.js unexpose …`) quand vous avez fini, ou liez-le à `127.0.0.1`
+  (`RAIL_TCP_BIND`) et passez par un tunnel SSH.
 
 ---
 
@@ -205,7 +243,8 @@ contrôle ne coupe aucun service.
 sudo git clone https://github.com/EntrepriseTools/Infra-server.git /opt/Infra-server
 cd /opt/Infra-server/paas
 ss -ltnp '( sport = :80 or sport = :443 )'     # si ça répond, voir l'étape 2
-sudo ./install.sh                               # garder le jeton affiché
+sudo ./install.sh                               # garder l'identifiant, le mot de passe et le jeton affichés
 export RAIL_URL=https://rail.<domaine> RAIL_TOKEN=<jeton>
 ./bin/rail.js status
+# puis le tableau de bord : https://rail.<domaine> — connexion avec l'identifiant et le mot de passe
 ```

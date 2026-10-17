@@ -76,12 +76,28 @@ if [ ! -f .env ]; then
   [ -n "$email" ]  || read -r -p "Courriel pour Let's Encrypt : " email
   [[ "$domain" =~ ^([a-z0-9-]+\.)+[a-z]{2,}$ ]] || die "domaine invalide : $domain"
   [[ "$email" == *@*.* ]] || die "courriel invalide : $email"
+  # Le compte avec lequel on se connectera au tableau de bord : identifiant et
+  # mot de passe. Le mot de passe se tire tout seul si on n'en propose pas.
+  admin_login="${RAIL_ADMIN_LOGIN:-}"
+  [ -n "$admin_login" ] || read -r -p "Identifiant du compte administrateur [admin] : " admin_login
+  admin_login="${admin_login:-admin}"
+  [[ "$admin_login" =~ ^[a-z0-9][a-z0-9._-]{1,30}$ ]] || die "identifiant invalide : $admin_login (minuscules, chiffres, point, tiret)"
+  admin_password="${RAIL_ADMIN_PASSWORD:-}"
+  if [ -z "$admin_password" ]; then
+    read -r -s -p "Mot de passe (vide = un mot de passe sera tiré au sort) : " admin_password; echo
+  fi
+  if [ -z "$admin_password" ]; then
+    admin_password="$(openssl rand -base64 18 | tr -d '\n=+/')"
+    mdp_tire=1
+  fi
+  [ "${#admin_password}" -ge 10 ] || die "le mot de passe doit faire au moins 10 caractères"
   umask 077
   sed -e "s|^RAIL_DOMAIN=.*|RAIL_DOMAIN=$domain|" \
       -e "s|^RAIL_ACME_EMAIL=.*|RAIL_ACME_EMAIL=$email|" \
       -e "s|^RAIL_ADMIN_TOKEN=.*|RAIL_ADMIN_TOKEN=$(openssl rand -base64 36 | tr -d '\n=+/' )|" \
       -e "s|^RAIL_SECRET_KEY=.*|RAIL_SECRET_KEY=$(openssl rand -hex 32)|" \
       .env.example > .env
+  printf 'RAIL_ADMIN_LOGIN=%s\nRAIL_ADMIN_PASSWORD=%s\n' "$admin_login" "$admin_password" >> .env
   created=1
 fi
 chmod 600 .env
@@ -173,7 +189,11 @@ case "$mode" in
   proxy) echo "  Mode TLS        : aucun ici — Rail écoute en clair sur le port $http_port, le HTTPS est à votre serveur de devant" ;;
 esac
 echo "  Tableau de bord : $url   (le certificat arrive en quelques secondes si le DNS est en place)"
-echo "  Jeton           : $(sed -n 's/^RAIL_ADMIN_TOKEN=//p' .env)"
+compte="$(sed -n 's/^RAIL_ADMIN_LOGIN=//p' .env | tail -1)"
+if [ -n "$compte" ]; then
+  echo "  Connexion       : $compte / $(sed -n 's/^RAIL_ADMIN_PASSWORD=//p' .env | tail -1)"
+fi
+echo "  Jeton de secours: $(sed -n 's/^RAIL_ADMIN_TOKEN=//p' .env | tail -1)   (API, CLI, et création du premier compte)"
 echo "  DNS requis      : *.${domain}  et  ${dash}  →  l'adresse IP de ce serveur"
 if [ "$mode" = proxy ]; then
   cat <<NGINX
@@ -200,11 +220,22 @@ if [ "$mode" = proxy ]; then
 NGINX
 fi
 echo
-echo "  Déployer         : tableau de bord → Nouveau projet → + Service (dépôt GitHub)"
-echo "  Base de données  : + Base de données (PostgreSQL, MySQL, Redis, MongoDB), branchée par \${{nom.DATABASE_URL}}"
+echo "  Se connecter     : tableau de bord → identifiant et mot de passe ci-dessus (à changer dans « Mon compte »)"
+echo "  Déployer         : Nouveau projet → + Service → choisir un dépôt GitHub dans la liste (reliez votre compte GitHub), ou une image Docker"
+echo "  En un clic       : page Catalogue → n8n, Ghost, WordPress, Metabase, Umami, Uptime Kuma, Gitea, MinIO, Grafana…"
+echo "  Base de données  : + Base de données (PostgreSQL, MySQL, MariaDB, Redis, Valkey, MongoDB, ClickHouse, Meilisearch, RabbitMQ)"
+echo "                     branchée dans un service par \${{nom.DATABASE_URL}}"
+echo "  Environnements   : un projet a « production » ; dupliquez-le en « preprod » depuis sa page"
+echo "  Tâches planifiées: + Tâche planifiée (cron), avec historique des exécutions"
+echo "  Sauvegardes      : onglet Sauvegardes d'une base (manuelles, planifiées, restauration)"
 echo "  Requêter         : onglet Requêtes d'une base (SQL, lecture seule par défaut) ou « rail sql projet/base \"SELECT 1\" »"
 echo "  Surveiller       : onglet Aperçu d'un service, page Conteneurs (tout ce que Docker fait tourner ici) et page Système"
+echo "  Comptes          : page Comptes — lecteur (regarde), membre (déploie), administrateur (tout)"
 echo "  Alertes          : renseignez RAIL_NOTIFY_URL dans .env (Slack, Discord ou votre webhook), puis relancez ce script"
 echo "  Sauvegarde       : sudo ./sauvegarde.sh    (à mettre en cron : 15 3 * * *  cd $PWD && ./sauvegarde.sh)"
-[ "${created:-0}" = 1 ] && echo "  Gardez .env ailleurs (surtout RAIL_SECRET_KEY) : sans elle, les variables chiffrées sont perdues."
+if [ "${created:-0}" = 1 ]; then
+  echo "  Gardez .env ailleurs (surtout RAIL_SECRET_KEY) : sans elle, les variables chiffrées sont perdues."
+  [ "${mdp_tire:-0}" = 1 ] && echo "  Le mot de passe ci-dessus a été tiré au sort : notez-le, puis changez-le depuis « Mon compte »."
+  echo "  Le compte est créé : vous pouvez retirer RAIL_ADMIN_PASSWORD de .env (il ne sert plus qu'au premier démarrage)."
+fi
 exit 0

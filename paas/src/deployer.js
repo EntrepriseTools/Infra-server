@@ -1,5 +1,5 @@
-// Le coeur : transformer « un commit » (ou « une image de base ») en « un conteneur
-// sain qui reçoit le trafic ».
+// Le coeur : transformer « un commit » (ou « une image ») en « un conteneur sain
+// qui reçoit le trafic ».
 //
 //   file d'attente (une opération à la fois par service)
 //     → récupérer le code → construire l'image → démarrer le nouveau conteneur
@@ -8,18 +8,28 @@
 // Si une étape échoue, l'ancien conteneur n'a jamais été touché : le service n'a pas bougé.
 // (Exception assumée : un service à volume persistant ne peut pas tourner en double —
 //  l'ancien est arrêté avant, et remis en marche si le nouveau échoue.)
+//
+// Trois sortes de services passent par ici :
+//   app        une API : image construite depuis GitHub, ou image publique, route HTTP
+//   database   une image officielle figée, volume persistant, réseau privé seulement
+//   cron       une image qu'on ne garde pas en marche : le planificateur la lance à l'heure dite
 import fs from 'node:fs';
 import path from 'node:path';
 import { fetchSource } from './source.js';
 import { detectBuild, materialize } from './detect.js';
 import { engineCmd, DB_CAPS } from './databases.js';
 import { resolveRefs } from './vars.js';
+import { volumeName, privateHost, containerName, PRODUCTION } from './naming.js';
+
+/** Les capacités qu'un service peut réclamer en plus (les modèles le font pour certaines images). */
+const CAPS_PERMISES = new Set(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID', 'KILL', 'NET_RAW', 'SYS_CHROOT']);
+const capsOf = (svc) => String(svc.extra_caps || '').split(',').map((c) => c.trim().toUpperCase()).filter((c) => CAPS_PERMISES.has(c));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => new Date().toISOString();
 const TERMINAL = new Set(['success', 'failed', 'canceled', 'skipped', 'removed']);
 
-export const volumeName = (serviceId) => `rail-vol-${serviceId}`;
+export { volumeName };
 
 class Canceled extends Error {}
 
@@ -38,12 +48,13 @@ export class Deployer {
   }
 
   // ── points d'entrée ──
-  /** Nouveau déploiement depuis GitHub (push, ou clic « Déployer »). */
+  /** Nouveau déploiement : depuis GitHub (push, clic « Déployer ») ou depuis une image. */
   deploy(serviceId, { trigger = 'manual', sha = null, message = null } = {}) {
     const svc = this.store.getService(serviceId);
     if (!svc) throw new Error('service inconnu');
-    // Une base de données n'a pas de dépôt : son « déploiement » est son image officielle.
-    if (svc.kind === 'database') return this.#enqueue(serviceId, { trigger, image: svc.base_image });
+    // Une base, ou un service bâti sur une image publique, n'a pas de dépôt :
+    // son « déploiement » est son image.
+    if (svc.source_kind === 'image') return this.#enqueue(serviceId, { trigger, image: svc.base_image, fresh: true });
     return this.#enqueue(serviceId, { trigger, commit_sha: sha, commit_message: message });
   }
   /** Relance l'image en service avec la configuration actuelle (variables, domaines…), sans reconstruire. */
@@ -51,12 +62,13 @@ export class Deployer {
     const svc = this.store.getService(serviceId);
     if (!svc) throw new Error('service inconnu');
     const active = this.#active(serviceId);
-    if (!active && svc.kind !== 'database') throw new Error('aucun déploiement en service à relancer');
+    if (!active && svc.source_kind !== 'image') throw new Error('aucun déploiement en service à relancer');
     return this.#enqueue(serviceId, {
       trigger: 'redeploy',
       commit_sha: active?.commit_sha ?? null,
       commit_message: active?.commit_message ?? null,
-      image: active?.image || svc.base_image,
+      image: svc.source_kind === 'image' ? svc.base_image : active?.image,
+      fresh: svc.source_kind === 'image',
     });
   }
   /** Retour arrière : remet l'image d'un déploiement passé, sans reconstruire. */
@@ -105,15 +117,16 @@ export class Deployer {
     if (this.#busy(serviceId)) throw new Error('un déploiement est en cours : attendez qu\'il se termine');
     const active = this.#active(serviceId);
     this.store.updateService(serviceId, { desired_state: 'running' });
+    if (svc.kind === 'cron') { this.#event(svc, 'service.started', 'info', `${svc.name} est de nouveau planifié`); return { state: 'scheduled' }; }
     const exists = active?.container ? await this.runtime.state(active.container) : null;
     if (!exists) {
-      if (!active && svc.kind !== 'database') throw new Error('aucun déploiement à démarrer : déployez d\'abord');
+      if (!active && svc.source_kind !== 'image') throw new Error('aucun déploiement à démarrer : déployez d\'abord');
       this.#event(svc, 'service.started', 'info', `${svc.name} redémarre (le conteneur avait disparu)`);
       return { deployment: this.redeploy(serviceId) };
     }
     await this.#chain(serviceId, async () => {
       await this.runtime.resume(active.container);
-      if (svc.kind !== 'database') this.#route(svc, active.container);
+      if (svc.kind === 'app') this.#route(svc, active.container);
     });
     this.#event(svc, 'service.started', 'info', `${svc.name} a été démarré`);
     return { state: 'running' };
@@ -147,6 +160,12 @@ export class Deployer {
     for (const d of this.store.deploymentsWithStatus('queued', 'building', 'deploying')) {
       this.store.updateDeployment(d.id, { status: 'failed', error: 'interrompu par le redémarrage du plan de contrôle', finished_at: now() });
     }
+    // Une exécution de tâche planifiée coupée en vol ne reste pas « en cours » pour l'éternité.
+    for (const svc of this.store.servicesWithCron()) {
+      for (const run of this.store.runningRuns(svc.id)) {
+        this.store.finishRun(run.id, { status: 'failed', output: 'interrompu par le redémarrage du plan de contrôle' });
+      }
+    }
     // Les routes se réécrivent depuis la base : le volume Traefik n'est qu'un cache.
     for (const svc of this.store.listServices()) {
       const active = svc.active_deployment_id && this.store.getDeployment(svc.active_deployment_id);
@@ -154,7 +173,7 @@ export class Deployer {
       let state = await this.runtime.state(active.container);
       // Après un redémarrage de l'hôte, un conteneur peut être resté sur le carreau.
       if (state && state !== 'running') { await this.runtime.resume(active.container); state = await this.runtime.state(active.container); }
-      if (state === 'running' && svc.kind !== 'database') this.#route(svc, active.container);
+      if (state === 'running' && svc.kind === 'app') this.#route(svc, active.container);
     }
   }
 
@@ -178,7 +197,7 @@ export class Deployer {
     const dep = this.store.createDeployment(serviceId, f);
     this.logs.begin(dep.id);
     this.logs.line(dep.id, `Déploiement #${dep.number} en file d'attente (${f.trigger})`);
-    this.#chain(serviceId, () => this.#execute(dep.id));
+    this.#chain(serviceId, () => this.#execute(dep.id, { fresh: !!f.fresh }));
     return dep;
   }
   /** Résolu quand la file du service est vide (tests, arrêt propre). */
@@ -203,31 +222,34 @@ export class Deployer {
   }
 
   // ── un déploiement, de bout en bout ──
-  async #execute(depId) {
+  async #execute(depId, { fresh = false } = {}) {
     let dep = this.store.getDeployment(depId);
     if (TERMINAL.has(dep.status)) return;
     const svc = this.store.getService(dep.service_id);
     if (!svc) return this.#finish(dep, 'canceled', 'service supprimé');
     const isDb = svc.kind === 'database';
+    const isCron = svc.kind === 'cron';
+    const fromImage = svc.source_kind === 'image';
     const ac = new AbortController();
     this.running.set(depId, ac);
     const log = (t) => this.logs.append(depId, t);
     const say = (t) => this.logs.line(depId, t);
-    const token = this.store.githubToken(svc.id) || this.config.defaultGithubToken;
+    const token = this.store.githubToken(svc.id) || this.#platformToken();
     const buildDir = path.join(this.config.buildsDir, depId);
     const previous = this.#active(svc.id);
     // Un volume ne se partage pas : la nouvelle version ne peut pas tourner à côté de l'ancienne.
-    const exclusive = !!svc.volume_path && !!previous?.container;
+    const exclusive = !!svc.volume_path && !!previous?.container && !isCron;
     let container = null;
     let halted = false;
     let semaphoreHeld = false;
     try {
       dep = this.store.updateDeployment(depId, { status: 'building', started_at: now() });
       let image = dep.image;
-      if (isDb) {
+      if (fromImage) {
         image = image || svc.base_image;
-        say(`Base de données ${svc.engine} — image ${image}`);
-        if (!(await this.runtime.imageExists(image))) {
+        if (!image) throw new Error('aucune image : renseignez l\'image de ce service');
+        say(`${isDb ? `Base de données ${svc.engine}` : 'Image'} — ${image}`);
+        if (fresh || !(await this.runtime.imageExists(image))) {
           say('→ Téléchargement de l\'image');
           await this.runtime.pull({ image, onLog: log, signal: ac.signal, timeoutMs: this.config.buildTimeoutMs });
         }
@@ -245,8 +267,15 @@ export class Deployer {
         this.#status(svc, dep, 'pending', 'Construction en cours');
         const ctx = path.join(buildDir, svc.root_dir);
         if (!fs.existsSync(ctx)) throw new Error(`le dossier « ${svc.root_dir} » n'existe pas dans le dépôt`);
-        const plan = detectBuild(ctx, { dockerfilePath: svc.dockerfile_path });
+        const plan = detectBuild(ctx, {
+          dockerfilePath: svc.dockerfile_path,
+          buildCommand: svc.build_command,
+          startCommand: svc.start_command,
+        });
         say(plan.kind === 'dockerfile' ? '→ Dockerfile du dépôt' : `→ Aucun Dockerfile : construction automatique (${plan.language})`);
+        if (plan.kind === 'dockerfile' && (svc.build_command || svc.start_command)) {
+          say('⚠ Le dépôt a son propre Dockerfile : les commandes de construction et de démarrage réglées ici sont ignorées.');
+        }
         image = `rail/${svc.id}:${dep.number}`;
         await this.runtime.build({
           contextDir: ctx, dockerfile: materialize(ctx, plan), tag: image,
@@ -258,14 +287,29 @@ export class Deployer {
       }
       if (ac.signal.aborted) throw new Canceled();
 
+      // ── une tâche planifiée ne reste pas en marche : l'image prête suffit ──
+      if (isCron) {
+        say(`✓ Image prête — exécution ${this.#cronWords(svc)}`);
+        this.store.updateService(svc.id, { active_deployment_id: dep.id });
+        this.#finish(dep, 'success');
+        this.#status(svc, dep, 'success', `Planifié (#${dep.number})`);
+        this.#event(svc, 'deployment.success', 'info', `${svc.name} : tâche planifiée #${dep.number} prête`, dep.id);
+        if (previous && previous.id !== dep.id) this.store.updateDeployment(previous.id, { status: 'removed' });
+        await this.#cleanup(svc);
+        return;
+      }
+
       // ── démarrer, vérifier ──
       dep = this.store.updateDeployment(depId, { status: 'deploying' });
-      container = `rail-${svc.id}-${dep.number}`;
+      container = containerName(svc.id, dep.number);
       const project = this.store.getProject(svc.project_id);
-      const env = this.#env(svc, project, dep);
+      const environment = this.store.getEnvironment(svc.environment_id);
+      const env = this.envFor(svc, { dep, onWarn: (w) => say(`⚠ ${w}`) });
       await this.runtime.stop(container, 1); // reste d'une tentative précédente
+      // Le volume doit exister (et appartenir au bon utilisateur) AVANT le démarrage.
+      if (svc.volume_path) await this.runtime.prepareVolume({ name: volumeName(svc.id), owner: svc.volume_owner, onLog: log });
       if (exclusive) {
-        say(`→ Arrêt de la version précédente (volume persistant : une seule à la fois, courte interruption)`);
+        say('→ Arrêt de la version précédente (volume persistant : une seule à la fois, courte interruption)');
         halted = await this.runtime.halt(previous.container, 30);
       }
       say(`→ Démarrage de ${container}`);
@@ -273,18 +317,21 @@ export class Deployer {
         name: container, image, env,
         labels: { 'rail.managed': 'true', 'rail.service': svc.id, 'rail.deployment': dep.id, 'rail.kind': svc.kind },
         memoryMb: svc.memory_mb || this.config.defaultMemoryMb, cpus: svc.cpus || this.config.defaultCpus,
-        alias: `${svc.name}.${project.name}.internal`,
+        alias: privateHost({ service: svc.name, project: project.name, environment: environment?.name }),
         volumes: svc.volume_path ? [{ name: volumeName(svc.id), path: svc.volume_path }] : [],
-        cmd: isDb ? engineCmd(svc.engine, env) : null,
-        caps: isDb ? DB_CAPS : [],
+        ports: svc.public_port ? [{ host: svc.public_port, container: svc.port, bind: this.config.tcpHost }] : [],
+        cmd: isDb ? engineCmd(svc.engine, env) : (svc.source_kind === 'image' && svc.start_command ? ['sh', '-c', svc.start_command] : null),
+        caps: isDb ? DB_CAPS : capsOf(svc),
         logMaxSizeMb: this.config.logMaxSizeMb, logMaxFiles: this.config.logMaxFiles,
       });
       this.store.updateDeployment(depId, { container });
       await this.#waitHealthy(svc, container, depId, ac.signal, say);
 
       // ── basculer ──
-      if (isDb) say(`✓ Disponible sur ${svc.name}.${project.name}.internal:${svc.port} (réseau privé)`);
-      else {
+      if (isDb) {
+        say(`✓ Disponible sur ${privateHost({ service: svc.name, project: project.name, environment: environment?.name })}:${svc.port} (réseau privé)`);
+        if (svc.public_port) say(`✓ Aussi joignable depuis l'extérieur sur le port ${svc.public_port}`);
+      } else {
         this.#route(svc, container);
         say(`✓ En service sur ${this.store.listDomains(svc.id).map((d) => this.config.urlFor(d.hostname)).join(', ') || '(aucun domaine)'}`);
       }
@@ -301,15 +348,15 @@ export class Deployer {
       const canceled = e instanceof Canceled || ac.signal.aborted;
       if (container) await this.runtime.stop(container, 1);
       if (halted) { say('→ Remise en marche de la version précédente'); await this.runtime.resume(previous.container); }
-      const fresh = this.store.getDeployment(depId);
-      if (fresh && !TERMINAL.has(fresh.status)) {
+      const fresh2 = this.store.getDeployment(depId);
+      if (fresh2 && !TERMINAL.has(fresh2.status)) {
         const reason = e?.message || String(e);
-        this.#finish(fresh, canceled ? 'canceled' : 'failed', canceled ? 'annulé' : reason);
-        this.#status(svc, fresh, canceled ? 'error' : 'failure', canceled ? 'Annulé' : reason);
+        this.#finish(fresh2, canceled ? 'canceled' : 'failed', canceled ? 'annulé' : reason);
+        this.#status(svc, fresh2, canceled ? 'error' : 'failure', canceled ? 'Annulé' : reason);
         this.#event(svc, canceled ? 'deployment.canceled' : 'deployment.failed', canceled ? 'warn' : 'error',
-          `${svc.name} : déploiement #${fresh.number} ${canceled ? 'annulé' : `en échec — ${reason}`}`, fresh.id);
+          `${svc.name} : déploiement #${fresh2.number} ${canceled ? 'annulé' : `en échec — ${reason}`}`, fresh2.id);
         if (!canceled) {
-          this.notifier?.send({ level: 'error', title: `${svc.name} : déploiement #${fresh.number} en échec`, text: reason, service: svc.name, url: `${this.config.publicUrl}/#/services/${svc.id}` });
+          this.notifier?.send({ level: 'error', title: `${svc.name} : déploiement #${fresh2.number} en échec`, text: reason, service: svc.name, url: `${this.config.publicUrl}/#/services/${svc.id}` });
         }
       }
     } finally {
@@ -319,26 +366,83 @@ export class Deployer {
     }
   }
 
-  /** Les variables du service, références « ${{autre-service.CLE}} » résolues, plus celles de la plateforme. */
-  #env(svc, project, dep) {
+  /** Le jeton GitHub commun : celui réglé dans l'interface, sinon celui du .env. */
+  #platformToken() {
+    try { return this.store.getSetting('github_token') || this.config.defaultGithubToken; }
+    catch { return this.config.defaultGithubToken; }
+  }
+  #cronWords(svc) { return svc.cron_schedule ? `selon « ${svc.cron_schedule} »` : 'à la demande'; }
+
+  /**
+   * Les variables remises au conteneur : celles de l'environnement du projet, puis
+   * celles du service (qui gagnent), les références « ${{autre-service.CLE}} » résolues
+   * dans le MÊME environnement, plus celles que la plateforme pose elle-même.
+   */
+  envFor(svc, { dep = null, onWarn = null } = {}) {
+    const project = this.store.getProject(svc.project_id);
+    const environment = this.store.getEnvironment(svc.environment_id);
     const vars = resolveRefs(
-      this.store.getVars(svc.id),
+      { ...this.store.getProjectVars(svc.environment_id), ...this.store.getVars(svc.id) },
       (name, key) => {
-        const other = this.store.findService(project.name, name);
+        const other = this.store.findEnvService(svc.environment_id, name);
         return other ? this.store.getVars(other.id)[key] : undefined;
       },
-      (w) => this.logs.line(dep.id, `⚠ ${w}`),
+      onWarn,
     );
     return {
       ...vars,
       PORT: String(svc.port),
-      RAIL_PROJECT_NAME: project.name,
+      RAIL_PROJECT_NAME: project?.name ?? '',
+      RAIL_ENVIRONMENT_NAME: environment?.name ?? PRODUCTION,
       RAIL_SERVICE_NAME: svc.name,
-      RAIL_DEPLOYMENT_ID: dep.id,
-      RAIL_GIT_COMMIT_SHA: dep.commit_sha || '',
-      RAIL_PRIVATE_DOMAIN: `${svc.name}.${project.name}.internal`,
+      RAIL_SERVICE_ID: svc.id,
+      RAIL_DEPLOYMENT_ID: dep?.id ?? '',
+      RAIL_GIT_COMMIT_SHA: dep?.commit_sha || '',
+      RAIL_PRIVATE_DOMAIN: privateHost({ service: svc.name, project: project?.name ?? '', environment: environment?.name }),
       RAIL_PUBLIC_DOMAIN: this.store.listDomains(svc.id)[0]?.hostname || '',
     };
+  }
+
+  /**
+   * Exécute une tâche planifiée : un conteneur jetable (`--rm`), l'image du dernier
+   * déploiement, les variables du service, et sa sortie gardée dans l'historique.
+   */
+  async runJob(serviceId, { trigger = 'manual' } = {}) {
+    const svc = this.store.getService(serviceId);
+    if (!svc) throw new Error('service inconnu');
+    if (svc.kind !== 'cron') throw new Error('ce service n\'est pas une tâche planifiée');
+    const active = this.#active(serviceId);
+    if (!active?.image) throw new Error('aucune image : déployez la tâche d\'abord');
+    if (this.store.runningRuns(serviceId).length) throw new Error('une exécution est déjà en cours');
+    const run = this.store.createRun(serviceId, trigger);
+    const name = `rail-job-${svc.id}-${run.number}`;
+    let out = '';
+    const take = (t) => { if (out.length < 200_000) out += t; };
+    this.#chain(serviceId, async () => {
+      try {
+        const code = await this.runtime.runOnce({
+          name, image: active.image, env: this.envFor(svc, { dep: active }),
+          cmd: svc.start_command ? ['sh', '-c', svc.start_command] : null,
+          memoryMb: svc.memory_mb || this.config.defaultMemoryMb, cpus: svc.cpus || this.config.defaultCpus,
+          caps: capsOf(svc),
+          volumes: svc.volume_path ? [{ name: volumeName(svc.id), path: svc.volume_path }] : [],
+          labels: { 'rail.managed': 'true', 'rail.service': svc.id, 'rail.kind': 'cron' },
+          onLog: take, timeoutMs: this.config.jobTimeoutMs,
+        });
+        this.store.finishRun(run.id, { status: code === 0 ? 'success' : 'failed', exitCode: code, output: out });
+        this.#event(svc, code === 0 ? 'job.success' : 'job.failed', code === 0 ? 'info' : 'error',
+          `${svc.name} : exécution #${run.number} ${code === 0 ? 'terminée' : `en échec (code ${code})`}`);
+        if (code !== 0) {
+          this.notifier?.send({ level: 'error', title: `${svc.name} : exécution #${run.number} en échec (code ${code})`, text: out.slice(-1500), service: svc.name, url: `${this.config.publicUrl}/#/services/${svc.id}` });
+        }
+      } catch (e) {
+        this.store.finishRun(run.id, { status: 'failed', output: `${out}\n${e.message}` });
+        this.#event(svc, 'job.failed', 'error', `${svc.name} : exécution #${run.number} impossible — ${e.message}`);
+      } finally {
+        this.store.pruneRuns(serviceId, 50);
+      }
+    });
+    return run;
   }
 
   async #waitHealthy(svc, container, depId, signal, say) {
@@ -376,8 +480,8 @@ export class Deployer {
   }
 
   #status(svc, dep, state, description) {
-    const token = this.store.githubToken(svc.id) || this.config.defaultGithubToken;
-    if (!token || !dep.commit_sha || !this.github) return;
+    const token = this.store.githubToken(svc.id) || this.#platformToken();
+    if (!token || !dep.commit_sha || !this.github || svc.source_kind === 'image') return;
     this.github.commitStatus({ token, repo: svc.repo, sha: dep.commit_sha, state, description, targetUrl: `${this.config.publicUrl}/#/services/${svc.id}` });
   }
 }

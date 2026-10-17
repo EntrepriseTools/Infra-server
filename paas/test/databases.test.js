@@ -19,9 +19,15 @@ async function boot() {
 
 test('catalogue : chaque moteur annonce son image, son port et son volume', () => {
   const ids = engineList().map((x) => x.id);
-  assert.deepEqual(ids, ['postgres', 'mysql', 'redis', 'mongo']);
+  assert.deepEqual(ids, ['postgres', 'mysql', 'mariadb', 'redis', 'valkey', 'mongo', 'clickhouse', 'meilisearch', 'rabbitmq']);
   for (const en of engineList()) {
     assert.ok(en.image.includes(':') && en.port > 0 && en.volume.startsWith('/'), en.id);
+    assert.ok(en.label && en.family && en.about, `${en.id} se présente`);
+  }
+  // Ce qui parle SQL a une console ET une liste de tables ; ce qui sait s'exporter sait se restaurer.
+  for (const en of engineList()) {
+    if (en.sql) assert.ok(engineList().find((x) => x.id === en.id), en.id);
+    if (en.backup) assert.ok(en.restore, `${en.id} : une sauvegarde sans restauration ne sert qu'à moitié`);
   }
   const p = provision({ engine: 'postgres', name: 'ma-base', project: 'demo' });
   assert.equal(p.fields.kind, 'database');

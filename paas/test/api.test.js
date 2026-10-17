@@ -173,8 +173,9 @@ test('vue d\'ensemble, système et mesures : de quoi peindre le tableau de bord 
   await e.monitor.tick();
 
   const o = (await call('GET', '/api/overview')).body;
-  assert.equal(o.projects[0].services[0].name, 'api');
-  assert.equal(o.projects[0].services[0].status.state, 'running');
+  const prod = o.projects[0].environments.find((x) => x.name === 'production');
+  assert.equal(prod.services[0].name, 'api');
+  assert.equal(prod.services[0].status.state, 'running');
   assert.ok(o.system.mem_total > 0 && o.system.cpus >= 1);
   assert.equal(o.system.docker, '27.0.0-test');
   assert.equal(o.system.states.running, 1);

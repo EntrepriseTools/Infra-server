@@ -6,6 +6,10 @@ import { run } from './proc.js';
 
 const CLIENT_ENV_KEEP = ['PATH', 'HOME', 'DOCKER_HOST', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'];
 
+/** Le durcissement commun à TOUT conteneur lancé par Rail, de service ou de tâche. */
+const HARDENING = ['--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE',
+  '--pids-limit', '512', '--add-host', 'host.docker.internal:host-gateway'];
+
 /** GET http://host:port/path ; vrai si le statut est 2xx/3xx. */
 export function probeHttp({ host, port, path, timeoutMs = 3000 }) {
   return new Promise((resolve) => {
@@ -78,13 +82,32 @@ export class DockerRuntime {
    * Démarre un conteneur durci. Les variables passent par l'environnement du client
    * (`-e CLE` sans valeur) : jamais dans la liste d'arguments, donc jamais dans `ps`.
    */
-  async start({ name, image, env, labels = {}, memoryMb, cpus, alias, volumes = [], cmd = null, caps = [], logMaxSizeMb = 10, logMaxFiles = 3 }) {
+  async start({ name, image, env, labels = {}, memoryMb, cpus, alias, volumes = [], ports = [], cmd = null, caps = [], logMaxSizeMb = 10, logMaxFiles = 3 }) {
     const args = ['run', '-d', '--name', name, '--network', this.network, '--restart', 'unless-stopped',
-      '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--cap-add', 'NET_BIND_SERVICE',
-      '--pids-limit', '512', '--add-host', 'host.docker.internal:host-gateway',
+      ...HARDENING,
       '--log-opt', `max-size=${logMaxSizeMb}m`, '--log-opt', `max-file=${logMaxFiles}`];
     for (const c of caps) args.push('--cap-add', c);
     if (alias) args.push('--network-alias', alias);
+    if (memoryMb) args.push('--memory', `${memoryMb}m`);
+    if (cpus) args.push('--cpus', String(cpus));
+    for (const v of volumes) args.push('-v', `${v.name}:${v.path}`);
+    // Exposition TCP : le port du conteneur publié sur la machine (une base joignable
+    // depuis un poste de travail, par exemple).
+    for (const p of ports) args.push('-p', `${p.bind || '0.0.0.0'}:${p.host}:${p.container}`);
+    for (const [k, v] of Object.entries(labels)) args.push('--label', `${k}=${v}`);
+    for (const k of Object.keys(env)) args.push('-e', k);
+    args.push(image);
+    if (cmd) args.push(...cmd);
+    return (await this.#d(args, { env })).trim();
+  }
+
+  /**
+   * Lance un conteneur jetable et attend la fin : c'est ainsi que tourne une tâche
+   * planifiée. Renvoie le code de sortie (0 = réussi) au lieu de lever.
+   */
+  async runOnce({ name, image, env = {}, cmd = null, memoryMb, cpus, volumes = [], labels = {}, caps = [], onLog, signal, timeoutMs }) {
+    const args = ['run', '--rm', '--name', name, '--network', this.network, ...HARDENING];
+    for (const c of caps) args.push('--cap-add', c);
     if (memoryMb) args.push('--memory', `${memoryMb}m`);
     if (cpus) args.push('--cpus', String(cpus));
     for (const v of volumes) args.push('-v', `${v.name}:${v.path}`);
@@ -92,7 +115,17 @@ export class DockerRuntime {
     for (const k of Object.keys(env)) args.push('-e', k);
     args.push(image);
     if (cmd) args.push(...cmd);
-    return (await this.#d(args, { env })).trim();
+    try {
+      await this.#d(args, { env, onData: onLog, onErr: onLog, signal, timeoutMs });
+      return 0;
+    } catch (e) {
+      // Un code de sortie non nul n'est pas une panne de Rail : c'est le résultat de la tâche.
+      if (typeof e.code === 'number' && e.code > 0) return e.code;
+      if (signal?.aborted) return 130;
+      // Le conteneur peut survivre à un délai dépassé : on ne laisse pas de traîne.
+      await this.stop(name, 1).catch(() => {});
+      throw e;
+    }
   }
 
   async stop(name, graceS = 30) {
@@ -161,18 +194,40 @@ export class DockerRuntime {
    * Exécute une commande DANS un conteneur (sauvegarde, requête SQL…).
    * `input` arrive par l'entrée standard : une requête n'apparaît jamais dans `ps` de l'hôte.
    */
-  exec(name, args, { env = {}, input, onData, onErr, signal, timeoutMs } = {}) {
+  exec(name, args, { env = {}, input, inputStream, onData, onErr, signal, timeoutMs } = {}) {
     const a = ['exec'];
-    if (input !== undefined) a.push('-i');
+    if (input !== undefined || inputStream) a.push('-i');
     for (const k of Object.keys(env)) a.push('-e', k);
     a.push(name, ...args);
-    return this.#d(a, { env, input, onData, onErr, signal, timeoutMs });
+    return this.#d(a, { env, input, inputStream, onData, onErr, signal, timeoutMs });
   }
   healthcheck({ name, port, path }) {
     return path ? probeHttp({ host: name, port, path }) : probeTcp({ host: name, port });
   }
 
   // ── volumes ──
+  /**
+   * Crée le volume s'il manque, et — pour les images qui tournent sous un utilisateur
+   * précis (Grafana 472, Gitea 1000…) — lui donne le bon propriétaire au moyen d'un
+   * conteneur jetable. Un volume déjà créé n'est pas retouché : son propriétaire est
+   * déjà le bon, et un « chown -R » sur des millions de fichiers coûte cher.
+   * @returns true si le volume a été créé par cet appel.
+   */
+  async prepareVolume({ name, owner = null, onLog = null, helperImage = 'busybox:stable' }) {
+    if (await this.volumeExists(name)) return false;
+    await this.#d(['volume', 'create', name]);
+    if (owner == null) return true;
+    const id = Number(owner);
+    if (!Number.isInteger(id) || id < 0 || id > 65535) throw new Error(`propriétaire de volume invalide : ${owner}`);
+    onLog?.(`→ Préparation du volume ${name} (propriétaire ${id})\n`);
+    await this.#d(['run', '--rm', '-v', `${name}:/mnt`, '--user', '0',
+      '--security-opt', 'no-new-privileges', '--cap-drop', 'ALL', '--cap-add', 'CHOWN', '--cap-add', 'FOWNER',
+      '--entrypoint', 'sh', helperImage, '-c', `chown ${id}:${id} /mnt && chmod 775 /mnt`], { onData: onLog });
+    return true;
+  }
+  async volumeExists(name) {
+    try { await this.#d(['volume', 'inspect', name]); return true; } catch { return false; }
+  }
   async volumeRemove(name) { try { await this.#d(['volume', 'rm', name]); return true; } catch { return false; } }
   async volumeSize(name) {
     try {

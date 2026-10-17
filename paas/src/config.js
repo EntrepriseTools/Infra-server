@@ -22,6 +22,11 @@ export function loadConfig(env = process.env) {
   if (!/^([a-z0-9-]+\.)+[a-z]{2,}$/.test(domain)) throw new Error('RAIL_DOMAIN doit être un nom de domaine (ex. apps.exemple.com)');
 
   const dataDir = path.resolve(env.RAIL_DATA_DIR || '/data');
+  // Plage de ports que Rail peut publier sur la machine quand on expose une base en TCP.
+  const tcp = /^(\d+)-(\d+)$/.exec(env.RAIL_TCP_PORTS || '20000-20050');
+  if (!tcp) throw new Error('RAIL_TCP_PORTS doit ressembler à « 20000-20050 »');
+  const tcpFrom = Number(tcp[1]); const tcpTo = Number(tcp[2]);
+  if (tcpFrom < 1024 || tcpTo > 65535 || tcpTo < tcpFrom) throw new Error('RAIL_TCP_PORTS : plage invalide (1024-65535, début ≤ fin)');
   const port = int(env.RAIL_PORT, 4000);
   const dashboardHost = (env.RAIL_DASHBOARD_HOST || `rail.${domain}`).toLowerCase();
 
@@ -47,6 +52,19 @@ export function loadConfig(env = process.env) {
   };
   return {
     tlsMode,
+    // ── comptes ──
+    sessionTtlMs: int(env.RAIL_SESSION_HOURS, 12) * 3600 * 1000,
+    // Premier administrateur : créé au démarrage s'il n'existe aucun compte.
+    bootstrapLogin: (env.RAIL_ADMIN_LOGIN || '').trim().toLowerCase() || null,
+    bootstrapPassword: env.RAIL_ADMIN_PASSWORD || null,
+    // ── exposition TCP, planification ──
+    tcpPortFrom: tcpFrom,
+    tcpPortTo: tcpTo,
+    tcpHost: env.RAIL_TCP_BIND || '0.0.0.0',
+    publicHost: (env.RAIL_PUBLIC_HOST || '').trim() || null,
+    schedulerIntervalMs: int(env.RAIL_SCHEDULER_INTERVAL_S, 30) * 1000,
+    jobTimeoutMs: int(env.RAIL_JOB_TIMEOUT_S, 3600) * 1000,
+    backupKeep: int(env.RAIL_BACKUP_KEEP, 7),
     httpPort,
     httpsPort,
     siteScheme,
@@ -91,5 +109,6 @@ export function loadConfig(env = process.env) {
     get logsDir() { return path.join(dataDir, 'logs'); },
     get routesDir() { return path.join(dataDir, 'traefik', 'dynamic'); },
     get dbFile() { return path.join(dataDir, 'rail.db'); },
+    get backupsDir() { return path.join(dataDir, 'backups'); },
   };
 }

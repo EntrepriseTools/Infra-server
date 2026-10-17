@@ -9,6 +9,9 @@ import { Routes } from '../src/routes.js';
 import { Deployer } from '../src/deployer.js';
 import { Monitor } from '../src/monitor.js';
 import { Notifier } from '../src/notify.js';
+import { Backups } from '../src/backup.js';
+import { Scheduler } from '../src/scheduler.js';
+import { Auth } from '../src/auth.js';
 import { createApp } from '../src/api.js';
 
 export const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'rail-test-'));
@@ -19,6 +22,8 @@ export class FakeRuntime {
     this.calls = []; this.images = new Set(); this.containers = new Map(); // nom → état
     this.healthy = true; this.buildError = null; this.crashOnStart = false; this.env = {};
     this.restarts = {}; this.volumes = new Set(); this.execs = []; this.pulled = [];
+    // Tâches planifiées : chaque exécution jetable est notée, avec le code de sortie qu'on veut.
+    this.jobs = []; this.jobExit = 0; this.prepared = [];
     // Ce que la machine fait tourner en dehors de Rail (nginx de l'hôte, autre pile compose…).
     this.externes = [];
   }
@@ -35,9 +40,9 @@ export class FakeRuntime {
   async imageExists(t) { return this.images.has(t); }
   async removeImage(t) { this.#n(`rmi ${t}`); this.images.delete(t); }
   async pruneImages() { this.#n('prune'); return 'Total reclaimed space: 0B'; }
-  async start({ name, image, env, labels, alias, memoryMb, volumes = [], cmd = null, caps = [] }) {
+  async start({ name, image, env, labels, alias, memoryMb, cpus, volumes = [], ports = [], cmd = null, caps = [] }) {
     this.#n(`start ${name}`);
-    this.env[name] = env; this.last = { name, image, labels, alias, memoryMb, volumes, cmd, caps };
+    this.env[name] = env; this.last = { name, image, labels, alias, memoryMb, cpus, volumes, ports, cmd, caps };
     for (const v of volumes) this.volumes.add(v.name);
     this.containers.set(name, this.crashOnStart ? 'exited' : 'running');
     return 'cid';
@@ -71,6 +76,13 @@ export class FakeRuntime {
     onData?.(out);
     return out;
   }
+  /** Un conteneur jetable : il tourne, il écrit, il sort. */
+  async runOnce({ name, image, env, cmd, onLog, labels, volumes = [], caps = [] }) {
+    this.#n(`runOnce ${name}`);
+    this.jobs.push({ name, image, env, cmd, labels, volumes, caps });
+    onLog?.(`travail de ${name}\n`);
+    return typeof this.jobExit === 'function' ? this.jobExit() : this.jobExit;
+  }
   async healthcheck() { return typeof this.healthy === 'function' ? this.healthy() : this.healthy; }
   async stats() {
     const out = {};
@@ -80,6 +92,14 @@ export class FakeRuntime {
   }
   async systemDf() { return { images: { count: 2, active: 1, size: 1000, reclaimable: 500 } }; }
   async version() { return '27.0.0-test'; }
+  async volumeExists(name) { return this.volumes.has(name); }
+  async prepareVolume({ name, owner = null }) {
+    if (this.volumes.has(name)) return false;
+    this.#n(`volume create ${name}`);
+    this.volumes.add(name);
+    this.prepared.push({ name, owner });
+    return true;
+  }
   async volumeRemove(name) { this.#n(`volume rm ${name}`); this.volumes.delete(name); return true; }
   async volumeSize() { return 4096; }
   async countRunning() { return [...this.containers.values()].filter((s) => s === 'running').length; }
@@ -99,11 +119,24 @@ export function env(overrides = {}) {
   const routes = new Routes(config.routesDir);
   const runtime = new FakeRuntime();
   const statuses = [];
-  const github = { commitStatus: async (s) => { statuses.push(s); }, installWebhook: async () => 42 };
+  const github = {
+    commitStatus: async (s) => { statuses.push(s); },
+    installWebhook: async () => 42,
+    me: async (token) => (token === 'ghp_mauvais' ? (() => { throw new Error('jeton GitHub refusé'); })() : { login: 'octocat', name: 'Octo Cat', avatar_url: null, html_url: null }),
+    repos: async () => [
+      { full_name: 'acme/api', private: false, default_branch: 'main', description: 'une API', language: 'JavaScript', pushed_at: '2026-01-01T00:00:00Z', html_url: null, archived: false },
+      { full_name: 'acme/site', private: true, default_branch: 'prod', description: null, language: 'Go', pushed_at: '2025-12-01T00:00:00Z', html_url: null, archived: false },
+    ],
+    branches: async () => ['main', 'preprod'],
+    head: async () => ({ sha: 'f'.repeat(40), message: 'dernier commit', author: 'ana', at: '2026-01-01T00:00:00Z' }),
+  };
   const notifier = new Notifier({ url: config.notifyUrl });
   const deployer = new Deployer({ store, runtime, routes, logs, github, config, notifier });
   const monitor = new Monitor({ store, runtime, config, notifier, log: { error() {}, warn() {} } });
-  return { dir, config, store, logs, routes, runtime, deployer, monitor, notifier, github, statuses };
+  const backups = new Backups({ store, runtime, config, notifier });
+  const scheduler = new Scheduler({ store, deployer, backups, config, log: { error() {}, warn() {} } });
+  const auth = new Auth({ store, config });
+  return { dir, config, store, logs, routes, runtime, deployer, monitor, notifier, github, statuses, backups, scheduler, auth };
 }
 
 /** Crée un vrai dépôt git local à <dir>/git/<repo>.git (le code est cloné via file://). */
@@ -130,7 +163,10 @@ export function seedService(e, f = {}) {
 
 /** Démarre l'API sur un port libre et renvoie de quoi l'appeler. */
 export async function serve(e) {
-  const server = createApp({ config: e.config, store: e.store, deployer: e.deployer, runtime: e.runtime, logs: e.logs, github: e.github, monitor: e.monitor, notifier: e.notifier });
+  const server = createApp({
+    config: e.config, store: e.store, deployer: e.deployer, runtime: e.runtime, logs: e.logs,
+    github: e.github, monitor: e.monitor, notifier: e.notifier, backups: e.backups, scheduler: e.scheduler, auth: e.auth,
+  });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const call = async (method, path, body, token = e.config.adminToken, headers = {}) => {
@@ -143,5 +179,27 @@ export async function serve(e) {
     let json; try { json = JSON.parse(text); } catch { json = text; }
     return { status: res.status, body: json, headers: res.headers };
   };
-  return { server, base, call, close: () => server.close() };
+  /**
+   * Se connecte avec un login et un mot de passe, et renvoie un appelant qui porte
+   * le cookie de session et l'anti-CSRF — ce que fait le navigateur.
+   */
+  const asUser = async (login_, password) => {
+    const res = await fetch(`${base}/api/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ login: login_, password }),
+    });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || `connexion refusée (${res.status})`);
+    const cookie = String(res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie') ?? '').split(';')[0];
+    const callAs = (method, path, payload, headers = {}) => call(method, path, payload, null, {
+      cookie, ...(method === 'GET' ? {} : { 'x-rail-csrf': body.csrf }), ...headers,
+    });
+    return { user: body.user, csrf: body.csrf, cookie, call: callAs };
+  };
+  return { server, base, call, asUser, close: () => server.close() };
+}
+
+/** Un compte prêt à l'emploi (le mot de passe est assez long pour la politique). */
+export function seedUser(e, { login = 'ana', role = 'admin', password = 'mot-de-passe-long' } = {}) {
+  const u = e.store.createUser({ login, name: login, role, password });
+  return { ...u, password };
 }

@@ -119,7 +119,12 @@ test('github : signature HMAC et lecture d\'un push', () => {
   assert.ok(!verifySignature(body, undefined, 's3cret'));
   assert.ok(!verifySignature(body, 'sha256=00', 's3cret'));
   assert.deepEqual(parsePush({ ref: 'refs/heads/feat/x', after: 'abc1234', repository: { full_name: 'a/b' }, head_commit: { message: 'titre\n\ncorps' } }),
-    { repo: 'a/b', branch: 'feat/x', sha: 'abc1234', message: 'titre' });
+    { repo: 'a/b', branch: 'feat/x', sha: 'abc1234', message: 'titre', files: [] });
+  // Les fichiers touchés servent aux chemins surveillés d'un monodépôt.
+  assert.deepEqual(parsePush({
+    ref: 'refs/heads/main', after: 'abc1234', repository: { full_name: 'a/b' },
+    commits: [{ added: ['api/a.js'], modified: ['api/a.js', 'web/b.css'] }, { removed: ['vieux.txt'] }],
+  }).files, ['api/a.js', 'web/b.css', 'vieux.txt']);
   assert.equal(parsePush({ ref: 'refs/tags/v1', after: 'abc' }), null);
   assert.equal(parsePush({ ref: 'refs/heads/main', after: '0'.repeat(40) }), null);
   assert.equal(parsePush({ ref: 'refs/heads/main', after: 'abc', deleted: true }), null);
@@ -273,7 +278,14 @@ test('db : une base en version 1 se met à jour toute seule', () => {
   assert.equal(svc.desired_state, 'running');
   s.addEvent({ kind: 'x', level: 'info', message: 'après migration' });
   assert.equal(s.listEvents({ limit: 1 })[0].message, 'après migration');
-  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 2);
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 3);
+  // v3 : le service a rejoint l'environnement « production », qui a été créé pour lui.
+  const prod = s.findEnvironment('p1', 'production');
+  assert.ok(prod, 'un environnement « production » par projet');
+  assert.equal(svc.environment_id, prod.id);
+  assert.equal(s.listEnvServices(prod.id).length, 1);
+  assert.equal(svc.source_kind, 'repo');
+  assert.equal(s.countUsers(), 0, 'aucun compte : le tableau de bord demandera d\'en créer un');
   s.close();
   assert.doesNotThrow(() => { const again = new Store(file, key); again.close(); }, 'rejouable');
 });

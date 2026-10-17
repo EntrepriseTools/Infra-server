@@ -254,7 +254,10 @@ api -X DELETE "$BASE/api/services/$base/expose" >/dev/null
 echo "  port $port ouvert, base joignée de l'extérieur, puis refermé"
 
 bleu "Environnement dupliqué : les services suivent, les mots de passe non"
-preprod="$(api -X POST "$BASE/api/projects/$projet/environments" -d "{\"name\":\"preprod\",\"copy_from\":\"$(api "$BASE/api/projects/$projet" | jq -r '.environments[] | select(.name=="production") | .id')\"}")"
+prod_env="$(api "$BASE/api/projects/$projet" | jq -r '.environments[] | select(.name=="production") | .id')"
+[ -n "$prod_env" ] && [ "$prod_env" != null ] || die "environnement production introuvable"
+preprod="$(api -X POST "$BASE/api/projects/$projet/environments" \
+  -d "$(jq -nc --arg c "$prod_env" '{name:"preprod",copy_from:$c}')")"
 echo "$preprod" | jq -e '.services | length >= 3' >/dev/null || { echo "$preprod"; die "les services n'ont pas été copiés"; }
 basecopie="$(echo "$preprod" | jq -r '.services[] | select(.name=="base") | .id')"
 [ "$(api "$BASE/api/services/$basecopie/variables" | jq -r .POSTGRES_PASSWORD)" \

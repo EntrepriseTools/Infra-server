@@ -330,9 +330,21 @@ export function mountApps(ctx) {
       if ('watch_paths' in body) p.watch_paths = watchPaths(body.watch_paths);
       if ('github_token' in body) p.github_token = body.github_token || null;
     }
-    const next = store.updateService(params.id, p);
+    const next = store.tx(() => {
+      const apres = store.updateService(params.id, p);
+      // Le nom est dans l'adresse : « api-demo.apps… » doit suivre « api » → « api-v2 ».
+      // Les domaines personnalisés, eux, appartiennent à qui les a ajoutés : on n'y touche pas.
+      if (p.name && apres.kind === 'app') {
+        const project = store.getProject(apres.project_id);
+        const env = store.getEnvironment(apres.environment_id);
+        const voulu = H.hostFor({ service: apres.name, project: project.name, environment: env?.name });
+        for (const d of store.listDomains(apres.id)) if (d.kind === 'auto') store.deleteDomain(d.id);
+        if (!store.listDomains(apres.id).some((d) => d.hostname === voulu)) store.addDomain(apres.id, voulu, 'auto');
+      }
+      return apres;
+    });
     if (p.name) {
-      ev({ kind: 'service.renamed', level: 'warn', project_id: s.project_id, service_id: s.id, subject: next.name, message: `service « ${s.name} » renommé en « ${next.name} » (redéployez pour appliquer)` });
+      ev({ kind: 'service.renamed', level: 'warn', project_id: s.project_id, service_id: s.id, subject: next.name, message: `service « ${s.name} » renommé en « ${next.name} » (redéployez pour appliquer : adresse publique et hôte privé changent)` });
     }
     return ok(H.publicService(next));
   });

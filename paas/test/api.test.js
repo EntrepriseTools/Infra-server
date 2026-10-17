@@ -262,3 +262,59 @@ test('CLI : état du serveur, bases de données, mesures, marche/arrêt', async 
   assert.match(await rail('prune'), /reclaimed/);
   close();
 });
+
+test('CLI : comptes, environnements, images, tâches planifiées, modèles, sauvegardes', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { e, close, server } = await boot();
+  const rail = async (...a) => (await promisify(execFile)('node', ['bin/rail.js', ...a], {
+    env: { PATH: process.env.PATH, RAIL_URL: `http://127.0.0.1:${server.address().port}`, RAIL_TOKEN: e.config.adminToken },
+    maxBuffer: 4 * 1024 * 1024,
+  })).stdout;
+
+  // Comptes et jetons : le jeton de secours est administrateur, et il le dit.
+  assert.match(await rail('whoami'), /root — Administrateur .*jeton d'administration/s);
+  assert.match(await rail('user:new', 'marie', '--password', 'mot-de-passe-long', '--role', 'member'), /compte créé : marie \(member\)/);
+  assert.match(await rail('users'), /marie\s+member/);
+
+  // Projets et environnements.
+  await rail('project:new', 'demo');
+  assert.match(await rail('envs', 'demo'), /production\s+0 service/);
+  await rail('service:new', 'demo', 'api', 'acme/api', '--port', '8080');
+  assert.match(await rail('env:new', 'demo', 'preprod', '--copy', 'production'), /environnement créé : demo\/preprod \(1 service\(s\)\)/);
+  await rail('env:vars:set', 'demo/preprod', 'ZONE=essai');
+  assert.equal(await rail('env:vars', 'demo/preprod'), 'ZONE="essai"\n');
+  // « projet/env/service » désigne le jumeau, « projet/service » celui de production.
+  const jumeau = JSON.parse(await rail('service', 'demo/preprod/api'));
+  assert.equal(jumeau.environment_name, 'preprod');
+  assert.equal(jumeau.domains[0].hostname, 'api-demo-preprod.apps.test.dev');
+  assert.notEqual(jumeau.id, JSON.parse(await rail('service', 'demo/api')).id);
+
+  // Une image publique, une tâche planifiée.
+  assert.match(await rail('image:new', 'demo', 'vitrine', 'nginx:1.27-alpine', '--port', '80'), /depuis l'image nginx:1\.27-alpine/);
+  assert.match(await rail('job:new', 'demo', 'menage', '--schedule', '0 3 * * *', '--image', 'alpine:3', '--start', 'echo ok'),
+    /tâche planifiée créée.*chaque jour à 03 h 00/s);
+  await e.deployer.drain();
+  assert.match(await rail('run', 'demo/menage'), /exécution #1 lancée/);
+  await e.deployer.drain();
+  assert.match(await rail('runs', 'demo/menage'), /success\s+manual/);
+
+  // Le catalogue, et une pile déployée.
+  assert.match(await rail('templates'), /uptime-kuma\s+Uptime Kuma/);
+  assert.match(await rail('template', 'demo', 'uptime-kuma'), /modèle « uptime-kuma » déployé : uptime/);
+  await e.deployer.drain();
+
+  // Bases : moteurs, sauvegardes gardées, exposition.
+  assert.match(await rail('engines'), /clickhouse\s+ClickHouse 24/);
+  await rail('db:new', 'demo', 'base', '--engine', 'postgres');
+  await e.deployer.drain();
+  assert.match(await rail('backup:new', 'demo/base'), /sauvegarde créée : base-/);
+  assert.match(await rail('backups', 'demo/base'), /success\s+manual/);
+  assert.match(await rail('backup:auto', 'demo/base', '0 4 * * *', '--keep', '3'), /chaque jour à 04 h 00.*garde les 3/);
+  assert.match(await rail('expose', 'demo/base'), new RegExp(`exposé sur apps.test.dev:${e.config.tcpPortFrom}`));
+  assert.match(await rail('unexpose', 'demo/base'), /plus exposé/);
+
+  // Et ce que le jeton ne permet pas est dit clairement.
+  await assert.rejects(rail('env:rm', 'demo/production'), /production/);
+  close();
+});

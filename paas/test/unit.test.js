@@ -362,3 +362,96 @@ test('routes : derrière un proxy, pas de TLS dans le fichier de route', () => {
   assert.equal(j.http.routers['rail-abc'].tls, undefined, 'c\'est le proxy de devant qui fait le HTTPS');
   assert.equal(j.http.services['rail-abc'].loadBalancer.servers[0].url, 'http://rail-abc-1:3000');
 });
+
+test('db : une base en version 2 (celle qui tourne) monte en version 3 sans rien perdre', async (t) => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const os = await import('node:os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rail-v2-'));
+  const file = path.join(dir, 'rail.db');
+  const key = Buffer.alloc(32, 7);
+  const secret = encrypt(key, 'secret-de-webhook');
+
+  // Le schéma exact de la version 2 : celui des installations déjà en service.
+  const old = new DatabaseSync(file);
+  old.exec(`
+    CREATE TABLE projects(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL);
+    CREATE TABLE services(
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, repo TEXT NOT NULL, branch TEXT NOT NULL, root_dir TEXT NOT NULL,
+      dockerfile_path TEXT, port INTEGER NOT NULL, healthcheck_path TEXT,
+      auto_deploy INTEGER NOT NULL DEFAULT 1, memory_mb INTEGER, cpus REAL,
+      webhook_secret_enc TEXT NOT NULL, github_token_enc TEXT, active_deployment_id TEXT,
+      created_at TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'app', engine TEXT, base_image TEXT,
+      desired_state TEXT NOT NULL DEFAULT 'running', volume_path TEXT,
+      UNIQUE(project_id, name));
+    CREATE TABLE variables(service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      key TEXT NOT NULL, value_enc TEXT NOT NULL, PRIMARY KEY(service_id, key));
+    CREATE TABLE domains(id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      hostname TEXT NOT NULL UNIQUE, kind TEXT NOT NULL);
+    CREATE TABLE deployments(id TEXT PRIMARY KEY, service_id TEXT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      number INTEGER NOT NULL, status TEXT NOT NULL, trigger TEXT NOT NULL,
+      commit_sha TEXT, commit_message TEXT, image TEXT, container TEXT, error TEXT,
+      created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, UNIQUE(service_id, number));
+    CREATE INDEX deployments_service ON deployments(service_id, number DESC);
+    CREATE TABLE events(
+      id TEXT PRIMARY KEY, at TEXT NOT NULL, kind TEXT NOT NULL, level TEXT NOT NULL,
+      project_id TEXT, service_id TEXT, deployment_id TEXT, subject TEXT, message TEXT NOT NULL);
+    CREATE INDEX events_at ON events(at DESC);
+    CREATE INDEX events_service ON events(service_id, at DESC);
+    CREATE TABLE samples(service_id TEXT NOT NULL, at INTEGER NOT NULL,
+      cpu REAL, mem INTEGER, mem_limit INTEGER, rx INTEGER, tx INTEGER, up INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(service_id, at)) WITHOUT ROWID;
+    CREATE TABLE host_samples(at INTEGER PRIMARY KEY, cpu REAL, load1 REAL, mem INTEGER, mem_total INTEGER,
+      disk INTEGER, disk_total INTEGER, containers INTEGER);
+    INSERT INTO projects VALUES('p1','boutique','2026-01-01');
+    INSERT INTO services VALUES('s1','p1','api','acme/api','main','.',NULL,3000,'/health',1,512,1,
+      '${secret}',NULL,'d1','2026-01-01','app',NULL,NULL,'running',NULL);
+    INSERT INTO services VALUES('s2','p1','base','','','.',NULL,5432,NULL,0,512,NULL,
+      '${secret}',NULL,'d2','2026-01-02','database','postgres','postgres:16-alpine','running','/var/lib/postgresql/data');
+    INSERT INTO variables VALUES('s2','DATABASE_URL','${encrypt(key, 'postgresql://rail:x@base.boutique.internal:5432/base')}');
+    INSERT INTO domains VALUES('dm1','s1','api-boutique.apps.test','auto');
+    INSERT INTO domains VALUES('dm2','s1','www.boutique.fr','custom');
+    INSERT INTO deployments VALUES('d1','s1',1,'success','push','abc1234','un commit','rail/s1:1','rail-s1-1',NULL,'2026-01-01','2026-01-01','2026-01-01');
+    INSERT INTO deployments VALUES('d2','s2',1,'success','manual',NULL,NULL,'postgres:16-alpine','rail-s2-1',NULL,'2026-01-02','2026-01-02','2026-01-02');
+    INSERT INTO events VALUES('e1','2026-01-01','deployment.success','info','p1','s1','d1','api','api : déploiement #1 en service');
+    INSERT INTO samples VALUES('s1',1767225600,12.5,1000,2000,10,20,1);
+    PRAGMA user_version=2;`);
+  old.close();
+
+  const s = new Store(file, key);
+  t.after(() => { s.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(s.db.prepare('PRAGMA user_version').get().user_version, 3);
+  assert.equal(s.db.prepare('PRAGMA foreign_key_check').all().length, 0, 'aucune référence cassée');
+
+  // Les deux services sont là, rangés dans l'environnement « production » qui vient d'être créé.
+  const prod = s.findEnvironment('p1', 'production');
+  assert.ok(prod);
+  assert.deepEqual(s.listEnvServices(prod.id).map((x) => x.name).sort(), ['api', 'base']);
+  const api = s.getService('s1');
+  assert.equal(api.environment_id, prod.id);
+  assert.equal(api.healthcheck_path, '/health');
+  assert.equal(api.source_kind, 'repo');
+  assert.equal(api.auto_deploy, true);
+  // Une base devient un service « bâti sur une image » : c'est ce qu'elle était déjà.
+  assert.equal(s.getService('s2').source_kind, 'image');
+  assert.equal(s.getService('s2').engine, 'postgres');
+
+  // Rien de ce qui pendait au service n'est tombé.
+  assert.equal(s.webhookSecret('s1'), 'secret-de-webhook');
+  assert.deepEqual(s.listDomains('s1').map((d) => d.hostname).sort(), ['api-boutique.apps.test', 'www.boutique.fr']);
+  assert.equal(s.listDeployments('s1').length, 1);
+  assert.equal(s.getDeployment('d1').container, 'rail-s1-1');
+  assert.match(s.getVars('s2').DATABASE_URL, /^postgresql:\/\/rail:/);
+  assert.equal(s.listEvents({ limit: 10 })[0].message, 'api : déploiement #1 en service');
+  assert.equal(s.lastSample('s1').cpu, 12.5);
+
+  // Et ce que la version 3 apporte fonctionne sur cette base-là.
+  assert.equal(s.countUsers(), 0, 'le tableau de bord demandera de créer le premier compte');
+  const preprod = s.createEnvironment('p1', 'preprod');
+  const jumeau = s.createService('p1', { name: 'api', port: 3000, environment_id: preprod.id });
+  assert.notEqual(jumeau.id, 's1', 'le même nom existe dans deux environnements');
+  s.setProjectVars(preprod.id, { ZONE: 'essai' });
+  assert.deepEqual(s.getProjectVars(preprod.id), { ZONE: 'essai' });
+  assert.doesNotThrow(() => { const re = new Store(file, key); re.close(); }, 'rejouable');
+});

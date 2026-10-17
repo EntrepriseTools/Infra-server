@@ -455,12 +455,25 @@ test('commandes de construction et de démarrage : elles passent dans le Dockerf
   close();
 });
 
-test('un service se renomme, et son nom reste unique dans son environnement', async () => {
+test('un service se renomme : son adresse suit, les domaines personnalisés restent', async () => {
   const { project, call, close } = await boot();
   const a = (await call('POST', `/api/projects/${project.id}/services`, { name: 'api', repo: 'acme/api' })).body;
   const b = (await call('POST', `/api/projects/${project.id}/services`, { name: 'site', repo: 'acme/api' })).body;
-  assert.equal((await call('PATCH', `/api/services/${a.id}`, { name: 'site' })).status, 409);
-  assert.equal((await call('PATCH', `/api/services/${a.id}`, { name: 'api-v2' })).body.name, 'api-v2');
+  await call('POST', `/api/services/${a.id}/domains`, { hostname: 'www.cliente.fr' });
+  assert.equal(a.domains[0].hostname, 'api-demo.apps.test.dev');
+
+  assert.equal((await call('PATCH', `/api/services/${a.id}`, { name: 'site' })).status, 409, 'le nom est déjà pris');
+  const renomme = (await call('PATCH', `/api/services/${a.id}`, { name: 'api-v2' })).body;
+  assert.equal(renomme.name, 'api-v2');
+  // L'adresse fournie par Rail porte le nom du service : elle le suit.
+  assert.deepEqual(renomme.domains.map((d) => d.hostname).sort(), ['api-v2-demo.apps.test.dev', 'www.cliente.fr']);
+  assert.equal(renomme.private_host, 'api-v2.demo.internal');
   assert.equal((await call('PATCH', `/api/services/${b.id}`, { name: 'API' })).status, 400);
+
+  // Une base se renomme aussi, et son hôte privé change avec elle.
+  const db = (await call('POST', `/api/projects/${project.id}/databases`, { engine: 'postgres', name: 'base' })).body;
+  const db2 = (await call('PATCH', `/api/services/${db.id}`, { name: 'base-2' })).body;
+  assert.equal(db2.private_host, 'base-2.demo.internal');
+  assert.equal(db2.domains.length, 0, 'une base n\'a jamais de domaine');
   close();
 });

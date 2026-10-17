@@ -573,10 +573,14 @@ rail status                          # le serveur et les services, depuis n'impo
 - **Redémarrer le plan de contrôle ne coupe aucun service** : vos conteneurs sont indépendants (`--restart unless-stopped`)
   et Traefik garde ses routes. Au redémarrage, un déploiement en cours est marqué échoué, les routes sont réécrites depuis
   la base, et un conteneur arrêté par accident est relancé.
-- **Tests** : `cd paas && npm test` (107 tests : un vrai dépôt git local, un faux Docker, de vraies requêtes HTTP — sans Docker).
+- **Tests** : `cd paas && npm test` (109 tests : un vrai dépôt git local, un faux Docker, de vraies requêtes HTTP — sans Docker ;
+  comptes et rôles, environnements, modèles, images, cron, sauvegardes, exposition, chemins surveillés, et la montée de
+  version 2 → 3 de la base).
   `./test/integration.sh` joue le tout contre un **vrai** Docker : construction de l'image, déploiement d'un vrai
-  PostgreSQL, mesures, console SQL (lecture, écriture, refus en lecture seule), sauvegarde logique, inventaire des
-  conteneurs, arrêt, redéploiement avec persistance des données, suppression. La CI joue les deux.
+  PostgreSQL, mesures, console SQL (lecture, écriture, refus en lecture seule), comptes et anti-CSRF, un service bâti
+  sur une image publique, une tâche planifiée et sa sortie, une sauvegarde restaurée après un `DROP TABLE`, un port TCP
+  joint depuis l'extérieur, un environnement dupliqué, inventaire des conteneurs, redéploiement avec persistance des
+  données, suppression. La CI joue les deux.
   Le tableau de bord se teste dans un vrai navigateur (facultatif, hors CI : il demande une dépendance) :
   `npm i --no-save playwright-core && CHROME=/usr/bin/google-chrome node test/navigateur.mjs --photos /tmp/rail` —
   26 gestes : se connecter, créer un projet, choisir un dépôt dans la liste, déployer une image, dupliquer un

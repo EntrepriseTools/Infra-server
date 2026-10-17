@@ -14,7 +14,7 @@ import { CRON_PRESETS } from './cron.js';
 const BUCKET = { 900: 15, 3600: 60, 21600: 300, 86400: 900, 604800: 3600 };
 
 export function mountPlatform(ctx) {
-  const { r, config, store, deployer, runtime, monitor, H } = ctx;
+  const { r, config, store, runtime, H } = ctx;
   let dockerCache = { at: 0, value: null };
 
   // ── santé & configuration ───────────────────────────────────────────────
